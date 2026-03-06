@@ -515,8 +515,24 @@ def process_fixture(fixture):
     starting_at = fixture.get("starting_at", "")
 
     # Збираємо обидва типи новин з міткою типу
-    prematch = [("pre", n) for n in fixture.get("prematchnews", [])]
-    postmatch = [("post", n) for n in fixture.get("postmatchnews", [])]
+    now_check = datetime.now()
+    match_dt = None
+    if starting_at:
+        try:
+            match_dt = datetime.strptime(starting_at[:16], "%Y-%m-%d %H:%M")
+        except:
+            pass
+
+    # Преметч — тільки якщо матч ще не почався
+    prematch = []
+    if match_dt is None or match_dt > now_check + timedelta(hours=1):
+        prematch = [("pre", n) for n in fixture.get("prematchnews", [])]
+
+    # Постматч — тільки якщо матч вже закінчився
+    postmatch = []
+    if match_dt is not None and match_dt < now_check - timedelta(hours=2):
+        postmatch = [("post", n) for n in fixture.get("postmatchnews", [])]
+
     news_items = prematch + postmatch
 
     if not news_items:
@@ -613,9 +629,9 @@ def run_all():
         match_time = datetime.strptime(f["starting_at"][:16], "%Y-%m-%d %H:%M")
         has_prematch = bool(f.get("prematchnews"))
         has_postmatch = bool(f.get("postmatchnews"))
-        # Преметч — тільки майбутні (більш ніж 1 година)
-        # Постматч — тільки за останні 24 години (свіжі результати)
-        if (has_prematch and match_time > now + timedelta(hours=1)) or            (has_postmatch and now - timedelta(hours=24) < match_time < now):
+        # Преметч — тільки якщо матч ЩЕ НЕ почався (більш ніж 1 година до старту)
+        # Постматч — тільки якщо матч ВЖЕ ЗІГРАНО (за останні 24 години)
+        if (has_prematch and match_time > now + timedelta(hours=1)) or            (has_postmatch and now - timedelta(hours=24) < match_time < now - timedelta(hours=2)):
             filtered.append(f)
     fixtures = filtered
     print(f"Матчів з новинами: {len(fixtures)}")
