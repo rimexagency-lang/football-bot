@@ -33,9 +33,13 @@ LEAGUE_IDS = [
     444, 486, 573, 591
 ]
 
-# Файл зберігається в тій самій папці що і bot.py
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PUBLISHED_FILE = os.path.join(BASE_DIR, "published_ids.json")
+# Railway Volume монтується в /data — там файли зберігаються між перезапусками
+# Локально (Windows) зберігається поряд з bot.py
+if os.path.exists("/data"):
+    PUBLISHED_FILE = "/data/published_ids.json"
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    PUBLISHED_FILE = os.path.join(BASE_DIR, "published_ids.json")
 
 # Надійні football фото — прямі посилання, перевірені вручну
 FALLBACK_IMAGES = [
@@ -127,7 +131,7 @@ def get_image_wikimedia(query):
             if info:
                 url = info[0].get("thumburl") or info[0].get("url")
                 print(f"  [Wikimedia] кандидат: {url}")
-                if url and url.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+                if url and url.lower().endswith((".jpg", ".jpeg", ".png", ".webp")) and ".pdf" not in url.lower():
                     print(f"✅ Wikimedia: {url}")
                     return url
         print("  [Wikimedia] підходящих фото не знайдено")
@@ -395,7 +399,37 @@ def post_to_telegram(text, image_url=None, force_photo=False, telegraph_url=None
                 if r.status_code == 200:
                     print("📤 Відправлено як фото+підпис")
                     return
-                print(f"⚠️ sendPhoto помилка: {r.json().get('description')}")
+
+                # URL не спрацював — скачуємо фото і відправляємо як файл
+                print(f"⚠️ sendPhoto URL помилка: {r.json().get('description')}. Скачуємо файл...")
+                try:
+                    import json as _json
+                    img_data = requests.get(image_url, timeout=10).content
+                    files = {"photo": ("photo.jpg", img_data, "image/jpeg")}
+                    data = {
+                        "chat_id": TELEGRAM_CHANNEL,
+                        "caption": text,
+                        "parse_mode": "HTML"
+                    }
+                    if telegraph_url:
+                        data["reply_markup"] = _json.dumps({
+                            "inline_keyboard": [[{
+                                "text": "📖 Читати повністю",
+                                "url": telegraph_url
+                            }]]
+                        })
+                    r2 = requests.post(
+                        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
+                        data=data, files=files, timeout=30
+                    )
+                    if r2.status_code == 200:
+                        print("📤 Відправлено як завантажений файл")
+                        return
+                    print(f"⚠️ Файл теж не спрацював: {r2.json().get('description')}")
+                except Exception as e:
+                    print(f"⚠️ Помилка скачування фото: {e}")
+                _send_as_text(text, None)
+                return
 
             # Текст довший 1024 — надсилаємо фото окремо, потім текст
             url_photo = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
@@ -524,7 +558,7 @@ def run_all():
     fixtures.sort(key=league_priority)
 
     # Фільтруємо — тільки майбутні матчі (початок більш ніж через 1 годину)
-    now = datetime.utcnow()
+    now = datetime.now()
     fixtures = [
         f for f in fixtures
         if f.get("starting_at") and
