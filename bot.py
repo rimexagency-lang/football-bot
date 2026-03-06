@@ -614,8 +614,8 @@ def run_all():
         has_prematch = bool(f.get("prematchnews"))
         has_postmatch = bool(f.get("postmatchnews"))
         # Преметч — тільки майбутні (більш ніж 1 година)
-        # Постматч — тільки минулі (матч вже зіграно)
-        if (has_prematch and match_time > now + timedelta(hours=1)) or            (has_postmatch and match_time < now):
+        # Постматч — тільки за останні 24 години (свіжі результати)
+        if (has_prematch and match_time > now + timedelta(hours=1)) or            (has_postmatch and now - timedelta(hours=24) < match_time < now):
             filtered.append(f)
     fixtures = filtered
     print(f"Матчів з новинами: {len(fixtures)}")
