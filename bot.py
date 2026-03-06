@@ -33,13 +33,9 @@ LEAGUE_IDS = [
     444, 486, 573, 591
 ]
 
-# Railway Volume монтується в /data — там файли зберігаються між перезапусками
-# Локально (Windows) зберігається поряд з bot.py
-if os.path.exists("/data"):
-    PUBLISHED_FILE = "/data/published_ids.json"
-else:
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    PUBLISHED_FILE = os.path.join(BASE_DIR, "published_ids.json")
+# Файл зберігається поряд з bot.py
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PUBLISHED_FILE = os.path.join(BASE_DIR, "published_ids.json")
 
 # Надійні football фото — прямі посилання, перевірені вручну
 FALLBACK_IMAGES = [
@@ -53,24 +49,71 @@ _fallback_index = 0
 
 
 def load_published_ids():
+    # 1. Спробуємо з файлу
     if os.path.exists(PUBLISHED_FILE):
         try:
             with open(PUBLISHED_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            # Підтримуємо обидва формати: старий (список ID) і новий (dict з датами)
             if isinstance(data, list):
-                # Старий формат — конвертуємо, вважаємо всі "сьогоднішніми"
                 today = datetime.now().strftime("%Y-%m-%d")
                 return {str(i): today for i in data}
             return data
         except (json.JSONDecodeError, Exception):
-            return {}
+            pass
+
+    # 2. Спробуємо з змінної середовища (резервна копія для Railway)
+    env_data = os.getenv("PUBLISHED_IDS_BACKUP")
+    if env_data:
+        try:
+            data = json.loads(env_data)
+            print(f"📦 Завантажено {len(data)} ID з env backup")
+            return data
+        except Exception:
+            pass
+
     return {}
 
 
 def save_published_ids(published_dict):
-    with open(PUBLISHED_FILE, "w", encoding="utf-8") as f:
-        json.dump(published_dict, f)
+    # Зберігаємо у файл
+    try:
+        with open(PUBLISHED_FILE, "w", encoding="utf-8") as f:
+            json.dump(published_dict, f)
+    except Exception as e:
+        print(f"⚠️ Не вдалося зберегти файл: {e}")
+
+    # Зберігаємо резервну копію в змінну Railway через API
+    railway_token = os.getenv("RAILWAY_API_TOKEN")
+    railway_service = os.getenv("RAILWAY_SERVICE_ID")
+    railway_env = os.getenv("RAILWAY_ENVIRONMENT_ID")
+    if railway_token and railway_service and railway_env:
+        try:
+            backup_str = json.dumps(published_dict)
+            # Оновлюємо змінну через Railway API
+            query = """
+            mutation($serviceId: String!, $environmentId: String!, $name: String!, $value: String!) {
+              variableUpsert(input: {
+                serviceId: $serviceId,
+                environmentId: $environmentId,
+                name: $name,
+                value: $value
+              })
+            }
+            """
+            requests.post(
+                "https://backboard.railway.app/graphql/v2",
+                headers={"Authorization": f"Bearer {railway_token}"},
+                json={"query": query, "variables": {
+                    "serviceId": railway_service,
+                    "environmentId": railway_env,
+                    "name": "PUBLISHED_IDS_BACKUP",
+                    "value": backup_str
+                }},
+                timeout=10
+            )
+            print(f"☁️ Backup збережено в Railway ({len(published_dict)} ID)")
+        except Exception as e:
+            print(f"⚠️ Railway backup помилка: {e}")
 
 
 def cleanup_old_ids(published_dict, days=7):
@@ -254,14 +297,14 @@ def get_image(fixture_name):
 
 
 def get_todays_fixtures():
-    # Шукаємо новини на найближчі 3 дні — беремо перші доступні
-    today = datetime.now().strftime("%Y-%m-%d")
+    # Вчора — для постматч новин, +3 дні — для преметч
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
     in_3_days = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d")
 
-    url = f"https://api.sportmonks.com/v3/football/fixtures/between/{today}/{in_3_days}"
+    url = f"https://api.sportmonks.com/v3/football/fixtures/between/{yesterday}/{in_3_days}"
     params = {
         "api_token": SPORTMONKS_TOKEN,
-        "include": "prematchNews.lines;participants;league",
+        "include": "prematchNews.lines;postmatchNews.lines;participants;league",
         "per_page": 50
     }
 
@@ -471,13 +514,16 @@ def process_fixture(fixture):
     league_name = fixture.get("league", {}).get("name", "")
     starting_at = fixture.get("starting_at", "")
 
-    news_list = fixture.get("prematchnews", [])
+    # Збираємо обидва типи новин з міткою типу
+    prematch = [("pre", n) for n in fixture.get("prematchnews", [])]
+    postmatch = [("post", n) for n in fixture.get("postmatchnews", [])]
+    news_items = prematch + postmatch
 
-    if not news_list:
+    if not news_items:
         print(f"Немає новин для: {fixture_name}")
         return
 
-    for news in news_list:
+    for news_type, news in news_items:
         news_id = news.get("id")
 
         if str(news_id) in published_ids:
@@ -496,7 +542,14 @@ def process_fixture(fixture):
             if text:
                 lines_ua.append(format_form(translate(text)))
 
-        time_str = starting_at[:16] if starting_at else ""
+        # Дата у форматі "07.03 19:30"
+        date_str = ""
+        if starting_at:
+            try:
+                dt = datetime.strptime(starting_at[:16], "%Y-%m-%d %H:%M")
+                date_str = dt.strftime("%d.%m %H:%M")
+            except:
+                date_str = starting_at[:16]
 
         # Повний текст для Telegraph
         full_text = "\n\n".join(lines_ua) if lines_ua else ""
@@ -507,18 +560,13 @@ def process_fixture(fixture):
             clean = re.sub(r'<[^>]+>', '', full_text)
             preview = clean[:300].rsplit(" ", 1)[0] + "…" if len(clean) > 300 else clean
 
-        # Формуємо пост
-        # Дата у форматі "07.03 19:30"
-        date_str = ""
-        if starting_at:
-            try:
-                dt = datetime.strptime(starting_at[:16], "%Y-%m-%d %H:%M")
-                date_str = dt.strftime("%d.%m %H:%M")
-            except:
-                date_str = starting_at[:16]
+        # Мітка типу новини
+        type_label = "📊 Підсумок матчу" if news_type == "post" else "🔮 Прев'ю матчу"
 
+        # Формуємо пост
         post = f"📌 <b>{fixture_name}</b>\n"
         post += f"⚽ {league_name} • 🗓 {date_str} UTC\n"
+        post += f"{type_label}\n"
         if title_ua:
             post += f"\n<b>{title_ua}</b>\n"
         if preview:
@@ -540,7 +588,7 @@ def process_fixture(fixture):
 
         published_ids[str(news_id)] = datetime.now().strftime("%Y-%m-%d")
         save_published_ids(published_ids)
-        print(f"✅ Опубліковано: {title_ua or fixture_name}")
+        print(f"✅ Опубліковано [{news_type}]: {title_ua or fixture_name}")
 
         time.sleep(5 * 60)  # 5 хвилин між постами
 
@@ -557,14 +605,20 @@ def run_all():
 
     fixtures.sort(key=league_priority)
 
-    # Фільтруємо — тільки майбутні матчі (початок більш ніж через 1 годину)
     now = datetime.now()
-    fixtures = [
-        f for f in fixtures
-        if f.get("starting_at") and
-        datetime.strptime(f["starting_at"][:16], "%Y-%m-%d %H:%M") > now + timedelta(hours=1)
-    ]
-    print(f"Майбутніх матчів з новинами: {len(fixtures)}")
+    filtered = []
+    for f in fixtures:
+        if not f.get("starting_at"):
+            continue
+        match_time = datetime.strptime(f["starting_at"][:16], "%Y-%m-%d %H:%M")
+        has_prematch = bool(f.get("prematchnews"))
+        has_postmatch = bool(f.get("postmatchnews"))
+        # Преметч — тільки майбутні (більш ніж 1 година)
+        # Постматч — тільки минулі (матч вже зіграно)
+        if (has_prematch and match_time > now + timedelta(hours=1)) or            (has_postmatch and match_time < now):
+            filtered.append(f)
+    fixtures = filtered
+    print(f"Матчів з новинами: {len(fixtures)}")
 
     published_count = 0
     for fixture in fixtures:
