@@ -523,6 +523,15 @@ def run_all():
 
     fixtures.sort(key=league_priority)
 
+    # Фільтруємо — тільки майбутні матчі (початок більш ніж через 1 годину)
+    now = datetime.utcnow()
+    fixtures = [
+        f for f in fixtures
+        if f.get("starting_at") and
+        datetime.strptime(f["starting_at"][:16], "%Y-%m-%d %H:%M") > now + timedelta(hours=1)
+    ]
+    print(f"Майбутніх матчів з новинами: {len(fixtures)}")
+
     published_count = 0
     for fixture in fixtures:
         if published_count >= MAX_POSTS_PER_RUN:
