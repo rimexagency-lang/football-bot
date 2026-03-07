@@ -127,6 +127,9 @@ def cleanup_old_ids(published_dict, days=7):
 
 
 published_ids = cleanup_old_ids(load_published_ids())
+# Одразу зберігаємо backup при старті щоб перевірити що API працює
+if published_ids:
+    save_published_ids(published_ids)
 
 
 # ========== ФУНКЦІЇ ==========
