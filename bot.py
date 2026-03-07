@@ -659,9 +659,10 @@ if __name__ == "__main__":
     print("📅 Розклад: 09:00 та 18:00 щодня")
     run_all()
 
-    # Кожні 2 години з 8:00 до 23:00
-    for hour in range(8, 24, 2):
+    # Кожні 2 години з 06:00 UTC (= 08:00 Київ, UTC+2) до 21:00 UTC (= 23:00 Київ)
+    for hour in range(6, 22, 2):
         schedule.every().day.at(f"{hour:02d}:00").do(run_all)
+    print(f"📅 Розклад: кожні 2 години з 06:00 до 20:00 UTC (08:00-22:00 Київ)")
 
     while True:
         try:
