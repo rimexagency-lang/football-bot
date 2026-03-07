@@ -717,6 +717,22 @@ def run_all():
     fixtures = get_todays_fixtures()
     print_daily_summary(fixtures)
 
+    # Спочатку публікуємо сьогоднішні, якщо є — завтрашні не чіпаємо
+    now_dt = datetime.now()
+    today_str = now_dt.strftime("%Y-%m-%d")
+
+    yesterday_str = (now_dt - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    # Сьогоднішні матчі (преметч + постматч)
+    # + вчорашні матчі (тільки постматч — новини з'являються після гри)
+    today_fixtures = [f for f in fixtures if f.get("starting_at", "").startswith(today_str)]
+    yesterday_postmatch = [
+        f for f in fixtures
+        if f.get("starting_at", "").startswith(yesterday_str) and f.get("postmatchnews")
+    ]
+    fixtures = today_fixtures + yesterday_postmatch
+    print(f"📅 Матчів для публікації: {len(today_fixtures)} сьогодні + {len(yesterday_postmatch)} вчорашніх постматч")
+
     # Сортуємо: спочатку топ-ліги, потім решта
     def league_priority(f):
         lid = f.get("league_id", 9999)
