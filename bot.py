@@ -663,6 +663,23 @@ def print_daily_summary(fixtures):
                     break
 
     total = len(pre_list) + len(post_list)
+    # Статистика по лігах
+    league_stats = {}
+    for f in fixtures:
+        lid = f.get("league_id")
+        lname = f.get("league", {}).get("name", str(lid)) if isinstance(f.get("league"), dict) else str(lid)
+        has_news = bool(f.get("prematchnews") or f.get("postmatchnews"))
+        if lname not in league_stats:
+            league_stats[lname] = {"total": 0, "with_news": 0}
+        league_stats[lname]["total"] += 1
+        if has_news:
+            league_stats[lname]["with_news"] += 1
+
+    print(f"\n📊 Матчі по лігах (з новинами / всього):")
+    for lname, s in sorted(league_stats.items(), key=lambda x: -x[1]["with_news"]):
+        if s["with_news"] > 0:
+            print(f"  {lname}: {s['with_news']}/{s['total']}")
+
     print(f"\n📋 Реально доступно для публікації: {total}")
     if pre_list:
         print(f"  Прев'ю ({len(pre_list)}):")
