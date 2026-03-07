@@ -106,10 +106,12 @@ def save_published_ids(published_dict):
                 }},
                 timeout=15
             )
-            if r.status_code == 200 and not r.json().get("errors"):
+            resp = r.json()
+            if r.status_code == 200 and not resp.get("errors"):
                 print(f"☁️ Backup збережено в Railway ({len(published_dict)} ID)")
             else:
-                print(f"⚠️ Railway backup помилка: {r.text[:200]}")
+                print(f"⚠️ Railway backup статус: {r.status_code}")
+                print(f"⚠️ Railway backup відповідь: {r.text[:300]}")
         except Exception as e:
             print(f"⚠️ Railway backup помилка: {e}")
 
