@@ -523,9 +523,9 @@ def process_fixture(fixture):
         except:
             pass
 
-    # Преметч — тільки якщо матч ще не почався
+    # Преметч — тільки якщо до матчу більше 4 годин
     prematch = []
-    if match_dt is None or match_dt > now_check + timedelta(hours=1):
+    if match_dt is None or match_dt > now_check + timedelta(hours=4):
         prematch = [("pre", n) for n in fixture.get("prematchnews", [])]
 
     # Постматч — тільки якщо матч вже закінчився
@@ -609,10 +609,60 @@ def process_fixture(fixture):
         time.sleep(2 * 60)  # 2 хвилини між постами
 
 
+def print_daily_summary(fixtures):
+    """Показує скільки новин доступно і на які матчі."""
+    now = datetime.now()
+    pre_list = []
+    post_list = []
+
+    for f in fixtures:
+        name = f.get("name", "?")
+        starting_at = f.get("starting_at", "")
+        date_str = ""
+        if starting_at:
+            try:
+                dt = datetime.strptime(starting_at[:16], "%Y-%m-%d %H:%M")
+                date_str = dt.strftime("%d.%m %H:%M")
+                match_dt = dt
+            except:
+                match_dt = None
+        else:
+            match_dt = None
+
+        prematch = f.get("prematchnews", [])
+        postmatch = f.get("postmatchnews", [])
+
+        for n in prematch:
+            if str(n.get("id")) not in published_ids:
+                pre_list.append(f"  🔮 {date_str} UTC — {name}")
+                break
+
+        for n in postmatch:
+            if str(n.get("id")) not in published_ids:
+                post_list.append(f"  📊 {date_str} UTC — {name}")
+                break
+
+    total = len(pre_list) + len(post_list)
+    print(f"\n📋 Доступно новин для публікації: {total}")
+    if pre_list:
+        print(f"  Прев'ю ({len(pre_list)}):")
+        for x in pre_list[:10]:
+            print(x)
+    if post_list:
+        print(f"  Підсумки ({len(post_list)}):")
+        for x in post_list[:10]:
+            print(x)
+
+    # Скільки запусків потрібно щоб опублікувати все
+    runs_needed = -(-total // MAX_POSTS_PER_RUN)  # округлення вверх
+    print(f"  Потрібно запусків: ~{runs_needed} (по {MAX_POSTS_PER_RUN} поста)")
+
+
 def run_all():
     print(f"\n{'='*40}")
     print(f"Запуск: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     fixtures = get_todays_fixtures()
+    print_daily_summary(fixtures)
 
     # Сортуємо: спочатку топ-ліги, потім решта
     def league_priority(f):
@@ -629,17 +679,28 @@ def run_all():
         match_time = datetime.strptime(f["starting_at"][:16], "%Y-%m-%d %H:%M")
         has_prematch = bool(f.get("prematchnews"))
         has_postmatch = bool(f.get("postmatchnews"))
-        # Преметч — тільки якщо матч ЩЕ НЕ почався (більш ніж 1 година до старту)
-        # Постматч — тільки якщо матч ВЖЕ ЗІГРАНО (за останні 24 години)
-        if (has_prematch and match_time > now + timedelta(hours=1)) or            (has_postmatch and now - timedelta(hours=24) < match_time < now - timedelta(hours=2)):
+        # Преметч — тільки якщо до матчу більше 4 годин
+        # Постматч — тільки якщо матч вже закінчився (за останні 24 години)
+        if (has_prematch and match_time > now + timedelta(hours=4)) or            (has_postmatch and now - timedelta(hours=24) < match_time < now - timedelta(hours=2)):
             filtered.append(f)
     fixtures = filtered
     print(f"Матчів з новинами: {len(fixtures)}")
 
+    # Динамічний ліміт: якщо новин багато і мало часу — публікуємо більше за раз
+    now_dyn = datetime.now()
+    urgent = sum(
+        1 for f in fixtures
+        if f.get("starting_at") and
+        now_dyn + timedelta(hours=4) < datetime.strptime(f["starting_at"][:16], "%Y-%m-%d %H:%M") < now_dyn + timedelta(hours=6)
+    )
+    dynamic_limit = MAX_POSTS_PER_RUN + urgent  # +1 за кожен терміновий матч
+    if urgent:
+        print(f"⚡ Терміново: {urgent} матчів через 4-6 годин, ліміт збільшено до {dynamic_limit}")
+
     published_count = 0
     for fixture in fixtures:
-        if published_count >= MAX_POSTS_PER_RUN:
-            print(f"⏹ Досягнуто ліміт {MAX_POSTS_PER_RUN} постів за запуск")
+        if published_count >= dynamic_limit:
+            print(f"⏹ Досягнуто ліміт {dynamic_limit} постів за запуск")
             break
         before = len(published_ids)
         process_fixture(fixture)
