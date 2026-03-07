@@ -326,14 +326,29 @@ def get_todays_fixtures():
     }
 
     try:
-        r = requests.get(url, params=params, timeout=20)
-        if r.status_code != 200:
-            print(f"Помилка API Sportmonks: {r.status_code}")
-            return []
+        all_fixtures = []
+        page = 1
+        while True:
+            params["page"] = page
+            r = requests.get(url, params=params, timeout=20)
+            if r.status_code != 200:
+                print(f"Помилка API Sportmonks: {r.status_code}")
+                break
 
-        fixtures = r.json().get("data", [])
-        filtered = [f for f in fixtures if f.get("league_id") in LEAGUE_IDS]
-        print(f"[{datetime.now().strftime('%H:%M')}] Знайдено матчів: {len(filtered)}")
+            resp = r.json()
+            batch = resp.get("data", [])
+            all_fixtures.extend(batch)
+
+            # Перевіряємо чи є ще сторінки
+            pagination = resp.get("pagination", {})
+            if not pagination.get("has_more", False):
+                break
+            page += 1
+            if page > 10:  # максимум 10 сторінок на всяк випадок
+                break
+
+        filtered = [f for f in all_fixtures if f.get("league_id") in LEAGUE_IDS]
+        print(f"[{datetime.now().strftime('%H:%M')}] Знайдено матчів: {len(filtered)} (всього в API: {len(all_fixtures)})")
         return filtered
     except Exception as e:
         print(f"Помилка отримання матчів: {e}")
