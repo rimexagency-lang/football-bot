@@ -161,18 +161,20 @@ def format_form(text):
 
 
 def get_image_wikimedia(query):
-    """Шукає фото через Wikimedia Commons API. Без ключів, прямі посилання."""
+    """Шукає фото через Wikimedia Commons API — тільки спортивні фото."""
     try:
         search_url = "https://commons.wikimedia.org/w/api.php"
+        # Додаємо "FC" або "stadium" щоб уникнути газет і старих фото
+        search_query = f"{query} football"
         params = {
             "action": "query",
             "generator": "search",
             "gsrnamespace": "6",
-            "gsrsearch": f"{query} football match",
-            "gsrlimit": "5",
+            "gsrsearch": search_query,
+            "gsrlimit": "10",  # Беремо більше щоб відфільтрувати погані
             "prop": "imageinfo",
-            "iiprop": "url",
-            "iiurlwidth": "800",
+            "iiprop": "url|size|mime",
+            "iiurlwidth": "960",
             "format": "json"
         }
         headers = {"User-Agent": "FootballNewsBot/1.0 (contact: admin@example.com)"}
@@ -180,20 +182,41 @@ def get_image_wikimedia(query):
         r.raise_for_status()
 
         if not r.text.strip():
-            print("  [Wikimedia] порожня відповідь")
             return None
 
         data = r.json()
         pages = data.get("query", {}).get("pages", {})
-        print(f"  [Wikimedia] знайдено сторінок: {len(pages)}")
+
+        # Збираємо кандидатів і фільтруємо
+        BAD_KEYWORDS = [".pdf", ".ogv", ".svg", ".tif", ".gif",
+                        "newspaper", "logo", "coat", "badge", "emblem",
+                        "crest", "flag", "map", "portrait", "headshot"]
+
+        candidates = []
         for page in pages.values():
             info = page.get("imageinfo", [])
-            if info:
-                url = info[0].get("thumburl") or info[0].get("url")
-                print(f"  [Wikimedia] кандидат: {url}")
-                if url and url.lower().endswith((".jpg", ".jpeg", ".png", ".webp")) and ".pdf" not in url.lower() and ".ogv" not in url.lower():
-                    print(f"✅ Wikimedia: {url}")
-                    return url
+            if not info:
+                continue
+            url = info[0].get("thumburl") or info[0].get("url", "")
+            url_lower = url.lower()
+
+            # Фільтр поганих форматів і типів
+            if not url_lower.endswith((".jpg", ".jpeg", ".png", ".webp")):
+                continue
+            if any(bad in url_lower for bad in BAD_KEYWORDS):
+                continue
+
+            # Перевіряємо розмір — мінімум 400px ширина
+            width = info[0].get("thumbwidth", 0) or 0
+            if width and width < 400:
+                continue
+
+            candidates.append(url)
+
+        if candidates:
+            print(f"✅ Wikimedia: {candidates[0]}")
+            return candidates[0]
+
         print("  [Wikimedia] підходящих фото не знайдено")
     except requests.exceptions.Timeout:
         print("  [Wikimedia] timeout")
