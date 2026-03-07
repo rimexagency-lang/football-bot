@@ -188,9 +188,15 @@ def get_image_wikimedia(query):
         pages = data.get("query", {}).get("pages", {})
 
         # Збираємо кандидатів і фільтруємо
-        BAD_KEYWORDS = [".pdf", ".ogv", ".svg", ".tif", ".gif",
-                        "newspaper", "logo", "coat", "badge", "emblem",
-                        "crest", "flag", "map", "portrait", "headshot"]
+        BAD_KEYWORDS = [
+            ".pdf", ".ogv", ".svg", ".tif", ".gif",
+            "logo", "Logo", "badge", "Badge", "emblem", "Emblem",
+            "crest", "Crest", "shield", "Shield", "coat_of",
+            "flag", "Flag", "map", "Map", "portrait", "Portrait",
+            "newspaper", "Newspaper", "kit", "Kit", "jersey", "Jersey",
+            "_fc_", "_sc_", "_ac_", "fc_logo", "club_logo",
+            "wappen", "Wappen",  # герб по-німецьки
+        ]
 
         candidates = []
         for page in pages.values():
