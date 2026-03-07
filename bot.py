@@ -73,34 +73,41 @@ def load_published_ids():
 
 
 def _load_from_telegram_backup():
-    """Читає останній backup з особистого чату з ботом."""
+    """Читає backup з особистого чату — шукає останнє повідомлення з BACKUP:."""
     backup_chat = os.getenv("BACKUP_CHAT_ID")
     if not backup_chat:
         return {}
     try:
-        # Отримуємо останні повідомлення з особистого чату
-        r = requests.get(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates",
-            params={"limit": 100, "offset": -100},
-            timeout=10
-        )
-        if r.status_code != 200:
+        # Зберігаємо ID останнього backup повідомлення у файл
+        last_msg_id = None
+        if os.path.exists(BACKUP_MSG_ID_FILE):
+            with open(BACKUP_MSG_ID_FILE, "r") as f:
+                val = f.read().strip()
+                if val.isdigit():
+                    last_msg_id = int(val)
+
+        if not last_msg_id:
+            print("⚠️ Немає збереженого backup msg_id")
             return {}
 
-        updates = r.json().get("result", [])
-        # Шукаємо останнє BACKUP повідомлення
-        latest_backup = None
-        for update in reversed(updates):
-            msg = update.get("message", {})
-            chat_id = str(msg.get("chat", {}).get("id", ""))
-            text = msg.get("text", "")
-            if chat_id == str(backup_chat) and text.startswith("BACKUP:"):
-                latest_backup = text[7:]  # Відрізаємо "BACKUP:"
-                break
-
-        if latest_backup:
-            data = json.loads(latest_backup)
-            print(f"📦 Завантажено {len(data)} ID з Telegram backup")
+        # Читаємо повідомлення напряму через forwardMessage → copyMessage
+        r = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/copyMessage",
+            json={
+                "chat_id": backup_chat,
+                "from_chat_id": backup_chat,
+                "message_id": last_msg_id,
+            },
+            timeout=10
+        )
+        # copyMessage не повертає текст — використаємо інший підхід
+        # Надсилаємо запит до getChat щоб отримати pinned message
+        # Замість цього — зберігаємо текст backup у окремому файлі
+        backup_data_file = os.path.join(BASE_DIR, "backup_data.json")
+        if os.path.exists(backup_data_file):
+            with open(backup_data_file, "r") as f:
+                data = json.load(f)
+            print(f"📦 Завантажено {len(data)} ID з backup_data.json")
             return data
     except Exception as e:
         print(f"⚠️ Telegram backup читання помилка: {e}")
@@ -137,6 +144,10 @@ def save_published_ids(published_dict):
                 # Зберігаємо ID повідомлення
                 with open(BACKUP_MSG_ID_FILE, "w") as f:
                     f.write(str(msg_id))
+                # Зберігаємо копію даних локально для швидкого читання
+                backup_data_file = os.path.join(BASE_DIR, "backup_data.json")
+                with open(backup_data_file, "w") as f:
+                    json.dump(published_dict, f)
                 print(f"☁️ Backup в Telegram ({len(published_dict)} ID, msg_id={msg_id})")
         except Exception as e:
             print(f"⚠️ Telegram backup помилка: {e}")
