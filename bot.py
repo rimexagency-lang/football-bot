@@ -53,8 +53,8 @@ BACKUP_MSG_ID_FILE = os.path.join(BASE_DIR, "backup_msg_id.txt")
 
 
 def load_published_ids():
-    """Завантажує ID з файлу або з Telegram backup повідомлення."""
-    # 1. Спробуємо з локального файлу
+    """Завантажує ID з файлу або з GitHub Gist."""
+    # 1. Локальний файл
     if os.path.exists(PUBLISHED_FILE):
         try:
             with open(PUBLISHED_FILE, "r", encoding="utf-8") as f:
@@ -63,54 +63,41 @@ def load_published_ids():
                 today = datetime.now().strftime("%Y-%m-%d")
                 return {str(i): today for i in data}
             if data:
-                print(f"📦 Завантажено {len(data)} ID з локального файлу")
+                print(f"📦 Завантажено {len(data)} ID з файлу")
                 return data
         except (json.JSONDecodeError, Exception):
             pass
 
-    # 2. Завантажуємо з Telegram backup
-    return _load_from_telegram_backup()
+    # 2. GitHub Gist backup
+    return _load_from_gist()
 
 
-def _load_from_telegram_backup():
-    """Читає backup з особистого чату — шукає останнє повідомлення з BACKUP:."""
-    backup_chat = os.getenv("BACKUP_CHAT_ID")
-    if not backup_chat:
+def _load_from_gist():
+    """Завантажує published_ids з GitHub Gist."""
+    gist_id = os.getenv("GIST_ID")
+    github_token = os.getenv("GITHUB_TOKEN")
+    if not gist_id:
         return {}
     try:
-        # Зберігаємо ID останнього backup повідомлення у файл
-        last_msg_id = None
-        if os.path.exists(BACKUP_MSG_ID_FILE):
-            with open(BACKUP_MSG_ID_FILE, "r") as f:
-                val = f.read().strip()
-                if val.isdigit():
-                    last_msg_id = int(val)
-
-        if not last_msg_id:
-            print("⚠️ Немає збереженого backup msg_id")
-            return {}
-
-        # Читаємо повідомлення напряму через forwardMessage → copyMessage
-        r = requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/copyMessage",
-            json={
-                "chat_id": backup_chat,
-                "from_chat_id": backup_chat,
-                "message_id": last_msg_id,
-            },
+        headers = {"Accept": "application/vnd.github+json"}
+        if github_token:
+            headers["Authorization"] = f"Bearer {github_token}"
+        r = requests.get(
+            f"https://api.github.com/gists/{gist_id}",
+            headers=headers,
             timeout=10
         )
-        # copyMessage не повертає текст — використаємо інший підхід
-        # Надсилаємо запит до getChat щоб отримати pinned message
-        # Замість цього — зберігаємо текст backup у окремому файлі
-        backup_data_file = os.path.join(BASE_DIR, "backup_data.json")
-        if os.path.exists(backup_data_file):
-            with open(backup_data_file, "r") as f:
-                data = json.load(f)
-            print(f"📦 Завантажено {len(data)} ID з backup_data.json")
-            return data
+        if r.status_code == 200:
+            files = r.json().get("files", {})
+            content_str = files.get("published_ids.json", {}).get("content", "")
+            if content_str:
+                data = json.loads(content_str)
+                print(f"📦 Завантажено {len(data)} ID з GitHub Gist")
+                return data
+        else:
+            print(f"⚠️ Gist читання помилка: {r.status_code}")
     except Exception as e:
-        print(f"⚠️ Telegram backup читання помилка: {e}")
+        print(f"⚠️ Gist помилка: {e}")
     return {}
 
 
@@ -123,34 +110,26 @@ def save_published_ids(published_dict):
     except Exception as e:
         print(f"⚠️ Файл: {e}")
 
-    # 2. Backup в Telegram — надсилаємо боту особисте повідомлення
-    # Отримуємо chat_id бота через getMe + використовуємо спеціальний chat
-    backup_chat = os.getenv("BACKUP_CHAT_ID")  # ID вашого особистого чату з ботом
-    if backup_chat and len(published_dict) > 0:
+    # 2. Backup у GitHub Gist
+    gist_id = os.getenv("GIST_ID")
+    github_token = os.getenv("GITHUB_TOKEN")
+    if gist_id and github_token:
         try:
-            backup_str = json.dumps(published_dict)
-            # Надсилаємо як невидиме повідомлення (disable_notification)
-            r = requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                json={
-                    "chat_id": backup_chat,
-                    "text": f"BACKUP:{backup_str}",
-                    "disable_notification": True
+            r = requests.patch(
+                f"https://api.github.com/gists/{gist_id}",
+                headers={
+                    "Authorization": f"Bearer {github_token}",
+                    "Accept": "application/vnd.github+json"
                 },
+                json={"files": {"published_ids.json": {"content": json.dumps(published_dict)}}},
                 timeout=10
             )
             if r.status_code == 200:
-                msg_id = r.json()["result"]["message_id"]
-                # Зберігаємо ID повідомлення
-                with open(BACKUP_MSG_ID_FILE, "w") as f:
-                    f.write(str(msg_id))
-                # Зберігаємо копію даних локально для швидкого читання
-                backup_data_file = os.path.join(BASE_DIR, "backup_data.json")
-                with open(backup_data_file, "w") as f:
-                    json.dump(published_dict, f)
-                print(f"☁️ Backup в Telegram ({len(published_dict)} ID, msg_id={msg_id})")
+                print(f"☁️ Backup у GitHub Gist ({len(published_dict)} ID)")
+            else:
+                print(f"⚠️ Gist збереження помилка: {r.status_code} {r.text[:100]}")
         except Exception as e:
-            print(f"⚠️ Telegram backup помилка: {e}")
+            print(f"⚠️ Gist помилка: {e}")
 
 
 def cleanup_old_ids(published_dict, days=7):
