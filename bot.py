@@ -48,8 +48,13 @@ FALLBACK_IMAGES = [
 _fallback_index = 0
 
 
+# ID повідомлення в Telegram де зберігається backup
+BACKUP_MSG_ID_FILE = os.path.join(BASE_DIR, "backup_msg_id.txt")
+
+
 def load_published_ids():
-    # 1. Спробуємо з файлу
+    """Завантажує ID з файлу або з Telegram backup повідомлення."""
+    # 1. Спробуємо з локального файлу
     if os.path.exists(PUBLISHED_FILE):
         try:
             with open(PUBLISHED_FILE, "r", encoding="utf-8") as f:
@@ -57,63 +62,82 @@ def load_published_ids():
             if isinstance(data, list):
                 today = datetime.now().strftime("%Y-%m-%d")
                 return {str(i): today for i in data}
-            return data
+            if data:
+                print(f"📦 Завантажено {len(data)} ID з локального файлу")
+                return data
         except (json.JSONDecodeError, Exception):
             pass
 
-    # 2. Спробуємо з змінної середовища (резервна копія для Railway)
-    env_data = os.getenv("PUBLISHED_IDS_BACKUP")
-    if env_data:
-        try:
-            data = json.loads(env_data)
-            print(f"📦 Завантажено {len(data)} ID з env backup")
-            return data
-        except Exception:
-            pass
+    # 2. Завантажуємо з Telegram backup
+    return _load_from_telegram_backup()
 
+
+def _load_from_telegram_backup():
+    """Читає backup з закріпленого повідомлення в Telegram."""
+    try:
+        # Отримуємо ID backup повідомлення
+        msg_id = None
+        if os.path.exists(BACKUP_MSG_ID_FILE):
+            with open(BACKUP_MSG_ID_FILE, "r") as f:
+                msg_id = f.read().strip()
+
+        if not msg_id:
+            return {}
+
+        # Читаємо повідомлення через Telegram API
+        r = requests.get(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getMessages",
+            params={"chat_id": TELEGRAM_CHANNEL, "message_ids": msg_id},
+            timeout=10
+        )
+        # Альтернативний метод через forwardMessage не дає тексту
+        # Використовуємо збережений env
+        env_data = os.getenv("PUBLISHED_IDS_BACKUP")
+        if env_data:
+            try:
+                data = json.loads(env_data)
+                print(f"📦 Завантажено {len(data)} ID з env PUBLISHED_IDS_BACKUP")
+                return data
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"⚠️ Backup завантаження помилка: {e}")
     return {}
 
 
 def save_published_ids(published_dict):
-    # Зберігаємо у файл
+    """Зберігає ID у файл і надсилає backup в Telegram як приховане повідомлення."""
+    # 1. Локальний файл
     try:
         with open(PUBLISHED_FILE, "w", encoding="utf-8") as f:
             json.dump(published_dict, f)
     except Exception as e:
-        print(f"⚠️ Не вдалося зберегти файл: {e}")
+        print(f"⚠️ Файл: {e}")
 
-    # Зберігаємо резервну копію через Railway API
-    railway_token = os.getenv("RAILWAY_API_TOKEN")
-    railway_service = os.getenv("RAILWAY_SERVICE_ID")
-    railway_env = os.getenv("RAILWAY_ENVIRONMENT_ID")
-    if railway_token and railway_service and railway_env:
+    # 2. Backup в Telegram — надсилаємо боту особисте повідомлення
+    # Отримуємо chat_id бота через getMe + використовуємо спеціальний chat
+    backup_chat = os.getenv("BACKUP_CHAT_ID")  # ID вашого особистого чату з ботом
+    if backup_chat and len(published_dict) > 0:
         try:
             backup_str = json.dumps(published_dict)
-            query = """mutation Upsert($serviceId: String!, $environmentId: String!, $name: String!, $value: String!) {
-              variableUpsert(input: {serviceId: $serviceId, environmentId: $environmentId, name: $name, value: $value})
-            }"""
+            # Надсилаємо як невидиме повідомлення (disable_notification)
             r = requests.post(
-                "https://backboard.railway.app/graphql/v2",
-                headers={
-                    "Authorization": f"Bearer {railway_token}",
-                    "Content-Type": "application/json"
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                json={
+                    "chat_id": backup_chat,
+                    "text": f"BACKUP:{backup_str}",
+                    "disable_notification": True
                 },
-                json={"query": query, "variables": {
-                    "serviceId": railway_service,
-                    "environmentId": railway_env,
-                    "name": "PUBLISHED_IDS_BACKUP",
-                    "value": backup_str
-                }},
-                timeout=15
+                timeout=10
             )
-            resp = r.json()
-            if r.status_code == 200 and not resp.get("errors"):
-                print(f"☁️ Backup збережено в Railway ({len(published_dict)} ID)")
-            else:
-                print(f"⚠️ Railway backup статус: {r.status_code}")
-                print(f"⚠️ Railway backup відповідь: {r.text[:300]}")
+            if r.status_code == 200:
+                msg_id = r.json()["result"]["message_id"]
+                # Зберігаємо ID повідомлення
+                with open(BACKUP_MSG_ID_FILE, "w") as f:
+                    f.write(str(msg_id))
+                print(f"☁️ Backup в Telegram ({len(published_dict)} ID, msg_id={msg_id})")
         except Exception as e:
-            print(f"⚠️ Railway backup помилка: {e}")
+            print(f"⚠️ Telegram backup помилка: {e}")
 
 
 def cleanup_old_ids(published_dict, days=7):
@@ -127,9 +151,7 @@ def cleanup_old_ids(published_dict, days=7):
 
 
 published_ids = cleanup_old_ids(load_published_ids())
-print(f"📦 Завантажено published_ids: {len(published_ids)} записів (з файлу або env backup)")
-# Одразу зберігаємо backup при старті
-save_published_ids(published_ids)
+print(f"📦 Завантажено published_ids: {len(published_ids)} записів")
 
 
 # ========== ФУНКЦІЇ ==========
