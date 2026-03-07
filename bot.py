@@ -303,6 +303,31 @@ def get_fallback_image():
     return img
 
 
+def get_image_pexels(query):
+    """Шукає фото через Pexels API — якісні спортивні фото."""
+    token = os.getenv("PEXELS_TOKEN")
+    if not token:
+        return None
+    try:
+        r = requests.get(
+            "https://api.pexels.com/v1/search",
+            headers={"Authorization": token},
+            params={"query": query, "per_page": 5, "orientation": "landscape"},
+            timeout=10
+        )
+        if r.status_code != 200:
+            return None
+        photos = r.json().get("photos", [])
+        for photo in photos:
+            url = photo.get("src", {}).get("large") or photo.get("src", {}).get("original")
+            if url:
+                print(f"✅ Pexels: {url}")
+                return url
+    except Exception as e:
+        print(f"  [Pexels] помилка: {e}")
+    return None
+
+
 def get_image(fixture_name):
     """
     Отримує фото для поста.
@@ -316,16 +341,21 @@ def get_image(fixture_name):
 
     # Список запитів від конкретного до загального
     queries = [
-        team1,                        # "Heidenheim"
-        team2,                        # "Hoffenheim"
-        f"{team1} football",          # "Heidenheim football"
-        "football stadium match",     # загальний
+        f"{team1} football match",    # "Athletic Club football match"
+        f"{team2} football match",    # "Barcelona football match"
+        f"{team1} {team2}",           # "Athletic Club Barcelona"
+        f"{team1} soccer",            # для Pexels
+        "football match stadium",     # загальний
     ]
 
     for q in queries:
         if not q:
             continue
         print(f"  🔍 Шукаємо фото: '{q}'")
+
+        img = get_image_pexels(q)
+        if img:
+            return img
 
         img = get_image_pixabay(q)
         if img:
