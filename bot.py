@@ -33,11 +33,12 @@ LEAGUE_IDS = [
     444, 486, 573, 591
 ]
 
-# Файл зберігається поряд з bot.py
+PRIORITY_LEAGUES = [2, 5, 8, 82, 564]
+MAX_POSTS_PER_RUN = 3
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PUBLISHED_FILE = os.path.join(BASE_DIR, "published_ids.json")
 
-# Надійні football фото — прямі посилання, перевірені вручну
 FALLBACK_IMAGES = [
     "https://upload.wikimedia.org/wikipedia/commons/thumb/1/1d/Football_Pallo_valmiina-cropped.jpg/320px-Football_Pallo_valmiina-cropped.jpg",
     "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5c/Football_iu_002.jpg/320px-Football_iu_002.jpg",
@@ -46,265 +47,8 @@ FALLBACK_IMAGES = [
     "https://upload.wikimedia.org/wikipedia/commons/thumb/2/2e/UEFA_Euro_2016_final.jpg/320px-UEFA_Euro_2016_final.jpg",
 ]
 _fallback_index = 0
-_used_images = set()  # Фото які вже використані в цьому запуску
+_used_images = set()
 
-
-# ID повідомлення в Telegram де зберігається backup
-BACKUP_MSG_ID_FILE = os.path.join(BASE_DIR, "backup_msg_id.txt")
-
-
-def load_published_ids():
-    """Завантажує ID з файлу або з GitHub Gist."""
-    # 1. Локальний файл
-    if os.path.exists(PUBLISHED_FILE):
-        try:
-            with open(PUBLISHED_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, list):
-                today = datetime.now().strftime("%Y-%m-%d")
-                return {str(i): today for i in data}
-            if data:
-                print(f"📦 Завантажено {len(data)} ID з файлу")
-                return data
-        except (json.JSONDecodeError, Exception):
-            pass
-
-    # 2. GitHub Gist backup
-    return _load_from_gist()
-
-
-def _load_from_gist():
-    """Завантажує published_ids з GitHub Gist."""
-    gist_id = os.getenv("GIST_ID")
-    github_token = os.getenv("GITHUB_TOKEN")
-    if not gist_id:
-        return {}
-    try:
-        headers = {"Accept": "application/vnd.github+json"}
-        if github_token:
-            headers["Authorization"] = f"Bearer {github_token}"
-        r = requests.get(
-            f"https://api.github.com/gists/{gist_id}",
-            headers=headers,
-            timeout=10
-        )
-        if r.status_code == 200:
-            files = r.json().get("files", {})
-            content_str = files.get("published_ids.json", {}).get("content", "")
-            if content_str:
-                data = json.loads(content_str)
-                print(f"📦 Завантажено {len(data)} ID з GitHub Gist")
-                return data
-        else:
-            print(f"⚠️ Gist читання помилка: {r.status_code}")
-    except Exception as e:
-        print(f"⚠️ Gist помилка: {e}")
-    return {}
-
-
-def save_published_ids(published_dict):
-    """Зберігає ID у файл і надсилає backup в Telegram як приховане повідомлення."""
-    # 1. Локальний файл
-    try:
-        with open(PUBLISHED_FILE, "w", encoding="utf-8") as f:
-            json.dump(published_dict, f)
-    except Exception as e:
-        print(f"⚠️ Файл: {e}")
-
-    # 2. Backup у GitHub Gist
-    gist_id = os.getenv("GIST_ID")
-    github_token = os.getenv("GITHUB_TOKEN")
-    if gist_id and github_token:
-        try:
-            r = requests.patch(
-                f"https://api.github.com/gists/{gist_id}",
-                headers={
-                    "Authorization": f"Bearer {github_token}",
-                    "Accept": "application/vnd.github+json"
-                },
-                json={"files": {"published_ids.json": {"content": json.dumps(published_dict)}}},
-                timeout=10
-            )
-            if r.status_code == 200:
-                print(f"☁️ Backup у GitHub Gist ({len(published_dict)} ID)")
-            else:
-                print(f"⚠️ Gist збереження помилка: {r.status_code} {r.text[:100]}")
-        except Exception as e:
-            print(f"⚠️ Gist помилка: {e}")
-
-
-def cleanup_old_ids(published_dict, days=7):
-    """Видаляє ID старші ніж days днів щоб файл не розростався."""
-    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-    cleaned = {k: v for k, v in published_dict.items() if v >= cutoff}
-    removed = len(published_dict) - len(cleaned)
-    if removed:
-        print(f"🧹 Видалено старих ID: {removed}")
-    return cleaned
-
-
-published_ids = cleanup_old_ids(load_published_ids())
-print(f"📦 Завантажено published_ids: {len(published_ids)} записів")
-
-
-# ========== ФУНКЦІЇ ==========
-
-def format_form(text):
-    def replace_form(match):
-        form = match.group(1)
-        emoji = ""
-        for char in form:
-            if char == "W": emoji += "🟢"
-            elif char == "L": emoji += "🔴"
-            elif char == "D": emoji += "🟡"
-        return f"({emoji})"
-    return re.sub(r'\[([WDLU]+)\]', replace_form, text)
-
-
-def get_image_wikimedia(query):
-    """Шукає фото через Wikimedia Commons API — тільки спортивні фото."""
-    try:
-        search_url = "https://commons.wikimedia.org/w/api.php"
-        # Додаємо "FC" або "stadium" щоб уникнути газет і старих фото
-        search_query = f"{query} football"
-        params = {
-            "action": "query",
-            "generator": "search",
-            "gsrnamespace": "6",
-            "gsrsearch": search_query,
-            "gsrlimit": "10",  # Беремо більше щоб відфільтрувати погані
-            "prop": "imageinfo",
-            "iiprop": "url|size|mime",
-            "iiurlwidth": "960",
-            "format": "json"
-        }
-        headers = {"User-Agent": "FootballNewsBot/1.0 (contact: admin@example.com)"}
-        r = requests.get(search_url, params=params, headers=headers, timeout=8)
-        r.raise_for_status()
-
-        if not r.text.strip():
-            return None
-
-        data = r.json()
-        pages = data.get("query", {}).get("pages", {})
-
-        # Збираємо кандидатів і фільтруємо
-        BAD_KEYWORDS = [
-            ".pdf", ".ogv", ".svg", ".tif", ".gif",
-            "logo", "Logo", "badge", "Badge", "emblem", "Emblem",
-            "crest", "Crest", "shield", "Shield", "coat_of",
-            "flag", "Flag", "map", "Map", "portrait", "Portrait",
-            "newspaper", "Newspaper", "kit", "Kit", "jersey", "Jersey",
-            "_fc_", "_sc_", "_ac_", "fc_logo", "club_logo",
-            "wappen", "Wappen",  # герб по-німецьки
-        ]
-
-        candidates = []
-        for page in pages.values():
-            info = page.get("imageinfo", [])
-            if not info:
-                continue
-            url = info[0].get("thumburl") or info[0].get("url", "")
-            url_lower = url.lower()
-
-            # Фільтр поганих форматів і типів
-            if not url_lower.endswith((".jpg", ".jpeg", ".png", ".webp")):
-                continue
-            if any(bad in url_lower for bad in BAD_KEYWORDS):
-                continue
-
-            # Перевіряємо розмір — мінімум 400px ширина
-            width = info[0].get("thumbwidth", 0) or 0
-            if width and width < 400:
-                continue
-
-            candidates.append(url)
-
-        if candidates:
-            print(f"✅ Wikimedia: {candidates[0]}")
-            return candidates[0]
-
-        print("  [Wikimedia] підходящих фото не знайдено")
-    except requests.exceptions.Timeout:
-        print("  [Wikimedia] timeout")
-    except Exception as e:
-        print(f"  [Wikimedia] помилка: {e}")
-    return None
-
-
-def get_image_openverse(query):
-    """
-    Openverse (WordPress/CC) — безкоштовно, без ключів, прямі посилання на фото.
-    """
-    try:
-        # Спрощений пошук — тільки назви команд без "vs"
-        clean_query = query.replace(" vs ", " ").replace(" vs. ", " ")
-        r = requests.get(
-            "https://api.openverse.org/v1/images/",
-            params={
-                "q": f"{clean_query} football",
-                "page_size": 5,
-                "license_type": "commercial",
-            },
-            headers={"User-Agent": "FootballNewsBot/1.0"},
-            timeout=10
-        )
-        r.raise_for_status()
-        results = r.json().get("results", [])
-        print(f"  [Openverse] знайдено: {len(results)}")
-        for item in results:
-            url = item.get("url", "")
-            if url and url.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
-                print(f"✅ Openverse: {url}")
-                return url
-    except requests.exceptions.Timeout:
-        print("  [Openverse] timeout")
-    except Exception as e:
-        print(f"  [Openverse] помилка: {e}")
-    return None
-
-
-def get_image_pixabay(query):
-    """
-    Pixabay — безкоштовний API (потрібна реєстрація на pixabay.com).
-    Додайте PIXABAY_TOKEN у .env файл щоб увімкнути.
-    """
-    PIXABAY_TOKEN = os.getenv("PIXABAY_TOKEN")
-    if not PIXABAY_TOKEN:
-        return None
-    try:
-        r = requests.get(
-            "https://pixabay.com/api/",
-            params={
-                "key": PIXABAY_TOKEN,
-                "q": f"{query} football",
-                "image_type": "photo",
-                "per_page": 3,
-                "safesearch": "true"
-            },
-            timeout=8
-        )
-        hits = r.json().get("hits", [])
-        if hits:
-            url = hits[0].get("webformatURL")
-            if url:
-                print(f"✅ Pixabay: {url}")
-                return url
-    except Exception as e:
-        print(f"Pixabay помилка: {e}")
-    return None
-
-
-def get_fallback_image():
-    """Повертає наступне фото зі статичного списку по черзі."""
-    global _fallback_index
-    img = FALLBACK_IMAGES[_fallback_index % len(FALLBACK_IMAGES)]
-    _fallback_index += 1
-    print(f"⚠️ Fallback фото #{_fallback_index}: {img}")
-    return img
-
-
-# Короткі популярні назви для пошуку фото
 TEAM_SEARCH_NAMES = {
     "Athletic Club": "Athletic Bilbao",
     "FC Barcelona": "Barcelona football",
@@ -331,41 +75,127 @@ TEAM_SEARCH_NAMES = {
     "Ajax": "Ajax Amsterdam football",
     "Benfica": "Benfica football",
     "Porto": "Porto football",
+    "Genoa": "Genoa CFC football 2025",
+    "Roma": "AS Roma football 2025",
 }
 
 
-def get_team_image_from_fixture(fixture):
-    """Отримує фото команди з даних матчу (Sportmonks participants)."""
+# ========== PUBLISHED IDS ==========
+
+def load_published_ids():
+    if os.path.exists(PUBLISHED_FILE):
+        try:
+            with open(PUBLISHED_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                today = datetime.now().strftime("%Y-%m-%d")
+                return {str(i): today for i in data}
+            if data:
+                print(f"📦 Завантажено {len(data)} ID з файлу")
+                return data
+        except Exception:
+            pass
+    return _load_from_gist()
+
+
+def _load_from_gist():
+    gist_id = os.getenv("GIST_ID")
+    github_token = os.getenv("GITHUB_TOKEN")
+    if not gist_id:
+        return {}
     try:
-        participants = fixture.get("participants", [])
-        for p in participants:
-            img = p.get("image_path") or p.get("logo_path")
-            if img and img.startswith("http"):
-                print(f"✅ Team image: {img}")
-                return img
+        headers = {"Accept": "application/vnd.github+json"}
+        if github_token:
+            headers["Authorization"] = f"Bearer {github_token}"
+        r = requests.get(
+            f"https://api.github.com/gists/{gist_id}",
+            headers=headers, timeout=10
+        )
+        if r.status_code == 200:
+            files = r.json().get("files", {})
+            content_str = files.get("published_ids.json", {}).get("content", "")
+            if content_str:
+                data = json.loads(content_str)
+                print(f"📦 Завантажено {len(data)} ID з GitHub Gist")
+                return data
     except Exception as e:
-        print(f"  [TeamImage] помилка: {e}")
-    return None
+        print(f"⚠️ Gist помилка: {e}")
+    return {}
+
+
+def save_published_ids(published_dict):
+    try:
+        with open(PUBLISHED_FILE, "w", encoding="utf-8") as f:
+            json.dump(published_dict, f)
+    except Exception as e:
+        print(f"⚠️ Файл: {e}")
+
+    gist_id = os.getenv("GIST_ID")
+    github_token = os.getenv("GITHUB_TOKEN")
+    if gist_id and github_token:
+        try:
+            r = requests.patch(
+                f"https://api.github.com/gists/{gist_id}",
+                headers={
+                    "Authorization": f"Bearer {github_token}",
+                    "Accept": "application/vnd.github+json"
+                },
+                json={"files": {"published_ids.json": {"content": json.dumps(published_dict)}}},
+                timeout=10
+            )
+            if r.status_code == 200:
+                print(f"☁️ Backup у GitHub Gist ({len(published_dict)} ID)")
+        except Exception as e:
+            print(f"⚠️ Gist помилка: {e}")
+
+
+def cleanup_old_ids(published_dict, days=7):
+    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    cleaned = {k: v for k, v in published_dict.items() if v >= cutoff}
+    removed = len(published_dict) - len(cleaned)
+    if removed:
+        print(f"🧹 Видалено старих ID: {removed}")
+    return cleaned
+
+
+published_ids = cleanup_old_ids(load_published_ids())
+print(f"📦 Завантажено published_ids: {len(published_ids)} записів")
+
+
+# ========== ФУНКЦІЇ ==========
+
+def format_form(text):
+    def replace_form(match):
+        form = match.group(1)
+        emoji = ""
+        for char in form:
+            if char == "W": emoji += "🟢"
+            elif char == "L": emoji += "🔴"
+            elif char == "D": emoji += "🟡"
+        return f"({emoji})"
+    return re.sub(r'\[([WDLU]+)\]', replace_form, text)
 
 
 def get_image_google(query):
-    """Шукає фото через Google Custom Search API — найрелевантніші результати."""
+    """Google Custom Search — тільки свіжі фото."""
     api_key = os.getenv("GOOGLE_SEARCH_KEY")
     cx = os.getenv("GOOGLE_SEARCH_CX")
     if not api_key or not cx:
         return None
     try:
+        year = datetime.now().year
         r = requests.get(
             "https://www.googleapis.com/customsearch/v1",
             params={
                 "key": api_key,
                 "cx": cx,
-                "q": query,
+                "q": f"{query} {year}",
                 "searchType": "image",
                 "num": 5,
                 "imgType": "photo",
                 "imgSize": "large",
-                "safe": "active"
+                "safe": "active",
+                "dateRestrict": "m6",  # тільки за останні 6 місяців
             },
             timeout=10
         )
@@ -385,24 +215,102 @@ def get_image_google(query):
     return None
 
 
+def get_image_wikimedia(query):
+    """Wikimedia Commons — тільки спортивні фото."""
+    try:
+        BAD_KEYWORDS = [
+            ".pdf", ".ogv", ".svg", ".tif", ".gif",
+            "logo", "badge", "emblem", "crest", "shield",
+            "coat_of", "flag", "map", "portrait", "newspaper",
+            "kit", "jersey", "wappen", "fc_logo", "club_logo",
+        ]
+        r = requests.get(
+            "https://commons.wikimedia.org/w/api.php",
+            params={
+                "action": "query",
+                "generator": "search",
+                "gsrnamespace": "6",
+                "gsrsearch": f"{query} football",
+                "gsrlimit": "10",
+                "prop": "imageinfo",
+                "iiprop": "url|size|mime",
+                "iiurlwidth": "960",
+                "format": "json"
+            },
+            headers={"User-Agent": "FootballNewsBot/1.0"},
+            timeout=8
+        )
+        r.raise_for_status()
+        pages = r.json().get("query", {}).get("pages", {})
+        for page in pages.values():
+            info = page.get("imageinfo", [])
+            if not info:
+                continue
+            url = info[0].get("thumburl") or info[0].get("url", "")
+            url_lower = url.lower()
+            if not url_lower.endswith((".jpg", ".jpeg", ".png", ".webp")):
+                continue
+            if any(bad in url_lower for bad in BAD_KEYWORDS):
+                continue
+            width = info[0].get("thumbwidth", 0) or 0
+            if width and width < 400:
+                continue
+            print(f"✅ Wikimedia: {url}")
+            return url
+    except Exception as e:
+        print(f"  [Wikimedia] помилка: {e}")
+    return None
+
+
+def get_image_openverse(query):
+    """Openverse — безкоштовно без ключів."""
+    try:
+        clean_query = query.replace(" vs ", " ").replace(" vs. ", " ")
+        r = requests.get(
+            "https://api.openverse.org/v1/images/",
+            params={
+                "q": f"{clean_query} football",
+                "page_size": 5,
+                "license_type": "commercial",
+            },
+            headers={"User-Agent": "FootballNewsBot/1.0"},
+            timeout=10
+        )
+        r.raise_for_status()
+        results = r.json().get("results", [])
+        for item in results:
+            url = item.get("url", "")
+            if url and url.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+                print(f"✅ Openverse: {url}")
+                return url
+    except Exception as e:
+        print(f"  [Openverse] помилка: {e}")
+    return None
+
+
 def get_image_pexels(query):
-    """Шукає фото через Pexels API — якісні спортивні фото."""
+    """Pexels — якісні спортивні фото."""
     import random
     token = os.getenv("PEXELS_TOKEN")
     if not token:
         return None
     try:
-        page = random.randint(1, 3)  # випадкова сторінка щоб не повторювати
+        page = random.randint(1, 3)
         r = requests.get(
             "https://api.pexels.com/v1/search",
             headers={"Authorization": token},
-            params={"query": query, "per_page": 10, "orientation": "landscape", "page": page},
+            params={
+                "query": query,
+                "per_page": 10,
+                "orientation": "landscape",
+                "page": page
+            },
             timeout=10
         )
         if r.status_code != 200:
             return None
         photos = r.json().get("photos", [])
-        random.shuffle(photos)  # перемішуємо результати
+        random.shuffle(photos)
         for photo in photos:
             url = photo.get("src", {}).get("large") or photo.get("src", {}).get("original")
             if url and url not in _used_images:
@@ -414,21 +322,26 @@ def get_image_pexels(query):
     return None
 
 
+def get_fallback_image():
+    global _fallback_index
+    img = FALLBACK_IMAGES[_fallback_index % len(FALLBACK_IMAGES)]
+    _fallback_index += 1
+    print(f"⚠️ Fallback фото: {img}")
+    return img
+
+
 def get_image(fixture_name, fixture=None):
-    """
-    Отримує фото для поста через Pexels/Wikimedia/Openverse.
-    """
-    # Пошук за назвою команди
+    """Отримує релевантне фото — Google → Wikimedia → Pexels → Openverse → Fallback."""
     parts = re.split(r' vs\.? ', fixture_name, flags=re.IGNORECASE)
     team1 = parts[0].strip() if parts else fixture_name
     team2 = parts[1].strip() if len(parts) > 1 else ""
 
-    # Використовуємо популярні назви для кращого пошуку
     search1 = TEAM_SEARCH_NAMES.get(team1, f"{team1} football")
     search2 = TEAM_SEARCH_NAMES.get(team2, f"{team2} football") if team2 else ""
 
-    # 1. Google Image Search — свіжі фото 2024-2025
     year = datetime.now().year
+
+    # 1. Google — найрелевантніші свіжі фото
     for q in [f"{search1} {year}", f"{search2} {year}", f"{team1} {team2} match {year}"]:
         if not q.strip():
             continue
@@ -453,19 +366,20 @@ def get_image(fixture_name, fixture=None):
         if img:
             return img
 
-    # 4. Pixabay
+    # 4. Openverse
     for q in [search1, search2]:
         if not q:
             continue
-        img = get_image_pixabay(q)
+        img = get_image_openverse(q)
         if img:
             return img
 
     return get_fallback_image()
 
 
+# ========== SPORTMONKS ==========
+
 def get_todays_fixtures():
-    # Вчора — для постматч новин, +3 дні — для преметч
     yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
     in_3_days = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d")
 
@@ -483,71 +397,82 @@ def get_todays_fixtures():
             params["page"] = page
             r = requests.get(url, params=params, timeout=20)
             if r.status_code != 200:
-                print(f"Помилка API Sportmonks: {r.status_code}")
+                print(f"Помилка API: {r.status_code}")
                 break
-
             resp = r.json()
             batch = resp.get("data", [])
             all_fixtures.extend(batch)
-
-            # Перевіряємо чи є ще сторінки
-            pagination = resp.get("pagination", {})
-            if not pagination.get("has_more", False):
+            if not resp.get("pagination", {}).get("has_more", False):
                 break
             page += 1
-            if page > 10:  # максимум 10 сторінок на всяк випадок
+            if page > 10:
                 break
 
         filtered = [f for f in all_fixtures if f.get("league_id") in LEAGUE_IDS]
-        print(f"[{datetime.now().strftime('%H:%M')}] Знайдено матчів: {len(filtered)} (всього в API: {len(all_fixtures)})")
+        print(f"[{datetime.now().strftime('%H:%M')}] Матчів: {len(filtered)} / {len(all_fixtures)}")
         return filtered
     except Exception as e:
         print(f"Помилка отримання матчів: {e}")
         return []
 
 
+# ========== ПЕРЕКЛАД ==========
+
 def translate(text):
-    """Перекладає текст через DeepL. Timeout 15с — без нього зависає."""
     try:
         r = requests.post(
             "https://api-free.deepl.com/v2/translate",
             headers={"Authorization": f"DeepL-Auth-Key {DEEPL_TOKEN}"},
             json={"text": [text], "target_lang": "UK"},
-            timeout=15  # КРИТИЧНО: без цього DeepL може зависнути назавжди
+            timeout=15
         )
         return r.json()["translations"][0]["text"]
     except requests.exceptions.Timeout:
-        print("⏱ DeepL timeout, повертаємо оригінал")
+        print("⏱ DeepL timeout")
         return text
     except Exception as e:
         print(f"Помилка перекладу: {e}")
         return text
 
 
-def publish_to_telegraph(title, text, image_url=None):
-    """
-    Публікує повний текст на Telegraph і повертає URL статті.
-    Telegraph не потребує реєстрації — використовуємо анонімний акаунт.
-    """
+# ========== TELEGRAPH ==========
+
+def _get_telegraph_token():
+    token_file = os.path.join(BASE_DIR, "telegraph_token.txt")
+    if os.path.exists(token_file):
+        with open(token_file, "r") as f:
+            return f.read().strip()
     try:
-        # Створюємо акаунт один раз (або використовуємо збережений токен)
+        r = requests.post(
+            "https://api.telegra.ph/createAccount",
+            json={"short_name": "FootballBot", "author_name": "Football News"},
+            timeout=10
+        )
+        data = r.json()
+        if data.get("ok"):
+            token = data["result"]["access_token"]
+            with open(token_file, "w") as f:
+                f.write(token)
+            print("✅ Telegraph акаунт створено")
+            return token
+    except Exception as e:
+        print(f"Telegraph помилка: {e}")
+    return None
+
+
+def publish_to_telegraph(title, text, image_url=None):
+    try:
         token = _get_telegraph_token()
         if not token:
             return None
-
-        # Формуємо контент сторінки у форматі Telegraph
         nodes = []
         if image_url:
             nodes.append({"tag": "img", "attrs": {"src": image_url}})
-
-        # Розбиваємо текст на параграфи
         for para in text.split("\n\n"):
             para = para.strip()
             if para:
-                # Очищаємо HTML теги для Telegraph
                 clean = re.sub(r'<[^>]+>', '', para)
                 nodes.append({"tag": "p", "children": [clean]})
-
         r = requests.post(
             "https://api.telegra.ph/createPage",
             json={
@@ -563,158 +488,125 @@ def publish_to_telegraph(title, text, image_url=None):
             url = data["result"]["url"]
             print(f"✅ Telegraph: {url}")
             return url
-        else:
-            print(f"Telegraph помилка: {data.get('error')}")
     except Exception as e:
         print(f"Telegraph помилка: {e}")
     return None
 
 
-def _get_telegraph_token():
-    """Зберігає Telegraph токен у файл щоб не створювати акаунт щоразу."""
-    token_file = "telegraph_token.txt"
-    if os.path.exists(token_file):
-        with open(token_file, "r") as f:
-            return f.read().strip()
-    try:
-        r = requests.post(
-            "https://api.telegra.ph/createAccount",
-            json={"short_name": "FootballBot", "author_name": "Football News"},
-            timeout=10
-        )
-        data = r.json()
-        if data.get("ok"):
-            token = data["result"]["access_token"]
-            with open(token_file, "w") as f:
-                f.write(token)
-            print(f"✅ Telegraph акаунт створено")
-            return token
-    except Exception as e:
-        print(f"Telegraph акаунт помилка: {e}")
-    return None
+# ========== TELEGRAM ==========
 
-
-def post_to_telegram(text, image_url=None, force_photo=False, telegraph_url=None):
-    """
-    Відправка поста:
-    - force_photo=True → завжди спочатку sendPhoto (фото зверху)
-    - Якщо текст > 1024 символів → надсилаємо фото окремо, потім текст
-    - Якщо sendPhoto не вдався → fallback на sendMessage з прев'ю
-    """
-    try:
-        CAPTION_LIMIT = 1024
-
-        if image_url and (force_photo or len(text) <= CAPTION_LIMIT):
-            if len(text) <= CAPTION_LIMIT:
-                # Фото + підпис одним повідомленням
-                url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
-                payload = {
-                    "chat_id": TELEGRAM_CHANNEL,
-                    "photo": image_url,
-                    "caption": text,
-                    "parse_mode": "HTML"
-                }
-                if telegraph_url:
-                    payload["reply_markup"] = {
-                        "inline_keyboard": [[{
-                            "text": "📖 Читати повністю",
-                            "url": telegraph_url
-                        }]]
-                    }
-                r = requests.post(url, json=payload, timeout=15)
-                if r.status_code == 200:
-                    print("📤 Відправлено як фото+підпис")
-                    return
-
-                # URL не спрацював — скачуємо фото і відправляємо як файл
-                print(f"⚠️ sendPhoto URL помилка: {r.json().get('description')}. Скачуємо файл...")
-                try:
-                    import json as _json
-                    img_data = requests.get(image_url, timeout=10).content
-                    files = {"photo": ("photo.jpg", img_data, "image/jpeg")}
-                    data = {
-                        "chat_id": TELEGRAM_CHANNEL,
-                        "caption": text,
-                        "parse_mode": "HTML"
-                    }
-                    if telegraph_url:
-                        data["reply_markup"] = _json.dumps({
-                            "inline_keyboard": [[{
-                                "text": "📖 Читати повністю",
-                                "url": telegraph_url
-                            }]]
-                        })
-                    r2 = requests.post(
-                        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
-                        data=data, files=files, timeout=30
-                    )
-                    if r2.status_code == 200:
-                        print("📤 Відправлено як завантажений файл")
-                        return
-                    print(f"⚠️ Файл теж не спрацював: {r2.json().get('description')}")
-                except Exception as e:
-                    print(f"⚠️ Помилка скачування фото: {e}")
-                _send_as_text(text, None)
-                return
-
-            # Текст довший 1024 — надсилаємо фото окремо, потім текст
-            url_photo = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
-            r = requests.post(url_photo, json={
-                "chat_id": TELEGRAM_CHANNEL,
-                "photo": image_url
-            }, timeout=15)
-            if r.status_code == 200:
-                print("📤 Фото надіслано окремо")
-            _send_as_text(text, image_url=None)
-        else:
-            _send_as_text(text, image_url)
-
-    except Exception as e:
-        print(f"Помилка відправки в Telegram: {e}")
-
-
-def _send_as_text(text, image_url=None):
-    """Відправляє як текст, з прев'ю фото через невидимий символ."""
+def _send_as_text(text, image_url=None, telegraph_url=None):
     if image_url:
         text = f'<a href="{image_url}">&#8205;</a>' + text
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHANNEL,
         "text": text,
         "parse_mode": "HTML",
-        "link_preview_options": {"is_disabled": False}
     }
-    r = requests.post(url, json=payload, timeout=15)
+    if telegraph_url:
+        payload["reply_markup"] = {
+            "inline_keyboard": [[{
+                "text": "📖 Читати повністю",
+                "url": telegraph_url
+            }]]
+        }
+    r = requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+        json=payload, timeout=15
+    )
     if r.status_code != 200:
-        print(f"❌ Помилка sendMessage: {r.text}")
+        print(f"❌ sendMessage помилка: {r.text}")
     else:
         print("📤 Відправлено як текст")
 
+
+def post_to_telegram(text, image_url=None, telegraph_url=None):
+    try:
+        CAPTION_LIMIT = 1024
+
+        if image_url and len(text) <= CAPTION_LIMIT:
+            payload = {
+                "chat_id": TELEGRAM_CHANNEL,
+                "photo": image_url,
+                "caption": text,
+                "parse_mode": "HTML"
+            }
+            if telegraph_url:
+                payload["reply_markup"] = {
+                    "inline_keyboard": [[{
+                        "text": "📖 Читати повністю",
+                        "url": telegraph_url
+                    }]]
+                }
+            r = requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
+                json=payload, timeout=15
+            )
+            if r.status_code == 200:
+                print("📤 Відправлено як фото+підпис")
+                return
+
+            # Якщо URL не спрацював — скачуємо і відправляємо файлом
+            print(f"⚠️ sendPhoto URL помилка. Скачуємо...")
+            try:
+                import json as _json
+                img_data = requests.get(image_url, timeout=10).content
+                files = {"photo": ("photo.jpg", img_data, "image/jpeg")}
+                data = {"chat_id": TELEGRAM_CHANNEL, "caption": text, "parse_mode": "HTML"}
+                if telegraph_url:
+                    data["reply_markup"] = _json.dumps({
+                        "inline_keyboard": [[{"text": "📖 Читати повністю", "url": telegraph_url}]]
+                    })
+                r2 = requests.post(
+                    f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
+                    data=data, files=files, timeout=30
+                )
+                if r2.status_code == 200:
+                    print("📤 Відправлено як завантажений файл")
+                    return
+            except Exception as e:
+                print(f"⚠️ Помилка скачування фото: {e}")
+
+            _send_as_text(text, None, telegraph_url)
+
+        elif image_url and len(text) > CAPTION_LIMIT:
+            # Фото окремо, потім текст
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
+                json={"chat_id": TELEGRAM_CHANNEL, "photo": image_url},
+                timeout=15
+            )
+            _send_as_text(text, None, telegraph_url)
+        else:
+            _send_as_text(text, image_url, telegraph_url)
+
+    except Exception as e:
+        print(f"Помилка відправки: {e}")
+
+
+# ========== ОБРОБКА МАТЧІВ ==========
 
 def process_fixture(fixture):
     fixture_name = fixture.get("name", "Невідомий матч")
     league_name = fixture.get("league", {}).get("name", "")
     starting_at = fixture.get("starting_at", "")
 
-    # Збираємо обидва типи новин з міткою типу
     now_check = datetime.now()
     match_dt = None
     if starting_at:
         try:
             match_dt = datetime.strptime(starting_at[:16], "%Y-%m-%d %H:%M")
-        except:
+        except Exception:
             pass
 
-    # Преметч — сьогодні за 2+ години, інші дні за 4+ години
-    prematch = []
     today_check = now_check.strftime("%Y-%m-%d")
     match_date_check = match_dt.strftime("%Y-%m-%d") if match_dt else today_check
     pre_threshold = timedelta(hours=2) if match_date_check == today_check else timedelta(hours=4)
+
+    prematch = []
     if match_dt is None or match_dt > now_check + pre_threshold:
         prematch = [("pre", n) for n in fixture.get("prematchnews", [])]
 
-    # Постматч — тільки якщо матч вже закінчився
     postmatch = []
     if match_dt is not None and match_dt < now_check - timedelta(hours=2):
         postmatch = [("post", n) for n in fixture.get("postmatchnews", [])]
@@ -744,28 +636,23 @@ def process_fixture(fixture):
             if text:
                 lines_ua.append(format_form(translate(text)))
 
-        # Дата у форматі "07.03 19:30"
         date_str = ""
         if starting_at:
             try:
                 dt = datetime.strptime(starting_at[:16], "%Y-%m-%d %H:%M")
                 date_str = dt.strftime("%d.%m %H:%M")
-            except:
+            except Exception:
                 date_str = starting_at[:16]
 
-        # Повний текст для Telegraph
         full_text = "\n\n".join(lines_ua) if lines_ua else ""
 
-        # Анонс — перші 300 символів тексту
         preview = ""
         if full_text:
             clean = re.sub(r'<[^>]+>', '', full_text)
             preview = clean[:300].rsplit(" ", 1)[0] + "…" if len(clean) > 300 else clean
 
-        # Мітка типу новини
         type_label = "📊 Підсумок матчу" if news_type == "post" else "🔮 Прев'ю матчу"
 
-        # Формуємо пост
         post = f"📌 <b>{fixture_name}</b>\n"
         post += f"⚽ {league_name} • 🗓 {date_str} UTC\n"
         post += f"{type_label}\n"
@@ -777,7 +664,6 @@ def process_fixture(fixture):
         image_url = get_image(fixture_name, fixture=fixture)
         print(f"🖼 Фото: {image_url}")
 
-        # Публікуємо повний текст на Telegraph
         telegraph_url = None
         if full_text:
             telegraph_url = publish_to_telegraph(
@@ -792,104 +678,31 @@ def process_fixture(fixture):
         save_published_ids(published_ids)
         print(f"✅ Опубліковано [{news_type}]: {title_ua or fixture_name}")
 
-        time.sleep(2 * 60)  # 2 хвилини між постами
+        time.sleep(2 * 60)
 
 
-def print_daily_summary(fixtures):
-    """Показує скільки новин реально доступно з урахуванням фільтрів."""
-    now = datetime.now()
-    pre_list = []
-    post_list = []
-
-    for f in fixtures:
-        name = f.get("name", "?")
-        starting_at = f.get("starting_at", "")
-        date_str = ""
-        match_dt = None
-        if starting_at:
-            try:
-                match_dt = datetime.strptime(starting_at[:16], "%Y-%m-%d %H:%M")
-                date_str = match_dt.strftime("%d.%m %H:%M")
-            except:
-                pass
-
-        prematch = f.get("prematchnews", [])
-        postmatch = f.get("postmatchnews", [])
-
-        # Тільки ті що пройдуть фільтр — превью за 4+ години до матчу
-        if match_dt and match_dt > now + timedelta(hours=4):
-            for n in prematch:
-                if str(n.get("id")) not in published_ids:
-                    hours_left = (match_dt - now).seconds // 3600
-                    pre_list.append(f"  🔮 {date_str} UTC — {name} (через ~{hours_left}г)")
-                    break
-
-        # Підсумки — тільки за останні 24 години
-        if match_dt and now - timedelta(hours=24) < match_dt < now - timedelta(hours=2):
-            for n in postmatch:
-                if str(n.get("id")) not in published_ids:
-                    post_list.append(f"  📊 {date_str} UTC — {name}")
-                    break
-
-    total = len(pre_list) + len(post_list)
-    # Статистика по лігах
-    league_stats = {}
-    for f in fixtures:
-        lid = f.get("league_id")
-        lname = f.get("league", {}).get("name", str(lid)) if isinstance(f.get("league"), dict) else str(lid)
-        has_news = bool(f.get("prematchnews") or f.get("postmatchnews"))
-        if lname not in league_stats:
-            league_stats[lname] = {"total": 0, "with_news": 0}
-        league_stats[lname]["total"] += 1
-        if has_news:
-            league_stats[lname]["with_news"] += 1
-
-    print(f"\n📊 Матчі по лігах (з новинами / всього):")
-    for lname, s in sorted(league_stats.items(), key=lambda x: -x[1]["with_news"]):
-        if s["with_news"] > 0:
-            print(f"  {lname}: {s['with_news']}/{s['total']}")
-
-    print(f"\n📋 Реально доступно для публікації: {total}")
-    if pre_list:
-        print(f"  Прев'ю ({len(pre_list)}):")
-        for x in pre_list[:15]:
-            print(x)
-    if post_list:
-        print(f"  Підсумки ({len(post_list)}):")
-        for x in post_list[:10]:
-            print(x)
-    if total == 0:
-        print("  Нових новин немає.")
-    else:
-        runs_needed = -(-total // MAX_POSTS_PER_RUN)
-        print(f"  Потрібно запусків: ~{runs_needed} (по {MAX_POSTS_PER_RUN} поста)")
-
+# ========== ГОЛОВНА ФУНКЦІЯ ==========
 
 def run_all():
     global _used_images
-    _used_images = set()  # скидаємо використані фото на кожен запуск
+    _used_images = set()
+
     print(f"\n{'='*40}")
     print(f"Запуск: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    fixtures = get_todays_fixtures()
-    print_daily_summary(fixtures)
 
-    # Спочатку публікуємо сьогоднішні, якщо є — завтрашні не чіпаємо
+    fixtures = get_todays_fixtures()
+
     now_dt = datetime.now()
     today_str = now_dt.strftime("%Y-%m-%d")
-
     yesterday_str = (now_dt - timedelta(days=1)).strftime("%Y-%m-%d")
 
-    # Сьогоднішні матчі (преметч + постматч)
-    # + вчорашні матчі (тільки постматч — новини з'являються після гри)
     today_fixtures = [f for f in fixtures if f.get("starting_at", "").startswith(today_str)]
     yesterday_postmatch = [
         f for f in fixtures
         if f.get("starting_at", "").startswith(yesterday_str) and f.get("postmatchnews")
     ]
     fixtures = today_fixtures + yesterday_postmatch
-    print(f"📅 Матчів для публікації: {len(today_fixtures)} сьогодні + {len(yesterday_postmatch)} вчорашніх постматч")
 
-    # Сортуємо: спочатку топ-ліги, потім решта
     def league_priority(f):
         lid = f.get("league_id", 9999)
         return PRIORITY_LEAGUES.index(lid) if lid in PRIORITY_LEAGUES else len(PRIORITY_LEAGUES)
@@ -901,21 +714,23 @@ def run_all():
     for f in fixtures:
         if not f.get("starting_at"):
             continue
-        match_time = datetime.strptime(f["starting_at"][:16], "%Y-%m-%d %H:%M")
+        try:
+            match_time = datetime.strptime(f["starting_at"][:16], "%Y-%m-%d %H:%M")
+        except Exception:
+            continue
         has_prematch = bool(f.get("prematchnews"))
         has_postmatch = bool(f.get("postmatchnews"))
-        # Преметч — сьогодні: за 2+ години, інші дні: за 4+ години
         match_date = match_time.strftime("%Y-%m-%d")
         today_date = now.strftime("%Y-%m-%d")
         prematch_threshold = timedelta(hours=2) if match_date == today_date else timedelta(hours=4)
-        # Постматч — тільки якщо матч вже закінчився (за останні 24 години)
-        if (has_prematch and match_time > now + prematch_threshold) or            (has_postmatch and now - timedelta(hours=24) < match_time < now - timedelta(hours=2)):
+        if (has_prematch and match_time > now + prematch_threshold) or \
+           (has_postmatch and now - timedelta(hours=24) < match_time < now - timedelta(hours=2)):
             filtered.append(f)
-    fixtures = filtered
-    print(f"Матчів з новинами: {len(fixtures)}")
+
+    print(f"Матчів з новинами: {len(filtered)}")
 
     published_count = 0
-    for fixture in fixtures:
+    for fixture in filtered:
         before = len(published_ids)
         process_fixture(fixture)
         if len(published_ids) > before:
@@ -925,24 +740,19 @@ def run_all():
 
 
 # ========== ЗАПУСК ==========
-# Топ-ліги — публікуються в першу чергу
-PRIORITY_LEAGUES = [2, 5, 8, 82, 564]  # UCL, UEL, PL, Bundesliga, La Liga
-MAX_POSTS_PER_RUN = 3  # максимум постів за один запуск (запуск кожні 2 години)
 
 if __name__ == "__main__":
     print("Бот запущено!")
-    print("📅 Розклад: 09:00 та 18:00 щодня")
     run_all()
 
-    # Кожну годину з 06:00 до 21:00 UTC
     for hour in range(6, 22):
         schedule.every().day.at(f"{hour:02d}:00").do(run_all)
-    print(f"📅 Розклад: щогодини з 06:00 до 21:00 UTC (08:00-23:00 Київ)")
+    print("📅 Розклад: щогодини з 06:00 до 21:00 UTC")
 
     while True:
         try:
             schedule.run_pending()
             time.sleep(60)
         except KeyboardInterrupt:
-            print("\nЗупинка бота користувачем.")
+            print("\nЗупинка бота.")
             break
