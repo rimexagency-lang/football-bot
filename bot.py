@@ -46,6 +46,7 @@ FALLBACK_IMAGES = [
     "https://upload.wikimedia.org/wikipedia/commons/thumb/2/2e/UEFA_Euro_2016_final.jpg/320px-UEFA_Euro_2016_final.jpg",
 ]
 _fallback_index = 0
+_used_images = set()  # Фото які вже використані в цьому запуску
 
 
 # ID повідомлення в Telegram де зберігається backup
@@ -303,24 +304,42 @@ def get_fallback_image():
     return img
 
 
+def get_team_image_from_fixture(fixture):
+    """Отримує фото команди з даних матчу (Sportmonks participants)."""
+    try:
+        participants = fixture.get("participants", [])
+        for p in participants:
+            img = p.get("image_path") or p.get("logo_path")
+            if img and img.startswith("http"):
+                print(f"✅ Team image: {img}")
+                return img
+    except Exception as e:
+        print(f"  [TeamImage] помилка: {e}")
+    return None
+
+
 def get_image_pexels(query):
     """Шукає фото через Pexels API — якісні спортивні фото."""
+    import random
     token = os.getenv("PEXELS_TOKEN")
     if not token:
         return None
     try:
+        page = random.randint(1, 3)  # випадкова сторінка щоб не повторювати
         r = requests.get(
             "https://api.pexels.com/v1/search",
             headers={"Authorization": token},
-            params={"query": query, "per_page": 5, "orientation": "landscape"},
+            params={"query": query, "per_page": 10, "orientation": "landscape", "page": page},
             timeout=10
         )
         if r.status_code != 200:
             return None
         photos = r.json().get("photos", [])
+        random.shuffle(photos)  # перемішуємо результати
         for photo in photos:
             url = photo.get("src", {}).get("large") or photo.get("src", {}).get("original")
-            if url:
+            if url and url not in _used_images:
+                _used_images.add(url)
                 print(f"✅ Pexels: {url}")
                 return url
     except Exception as e:
@@ -328,24 +347,28 @@ def get_image_pexels(query):
     return None
 
 
-def get_image(fixture_name):
+def get_image(fixture_name, fixture=None):
     """
     Отримує фото для поста.
-    Пробує кілька варіантів запиту від конкретного до загального.
-    Порядок джерел: Pixabay → Wikimedia → Openverse → статичний fallback
+    1. Фото команди з Sportmonks (логотип — завжди релевантний)
+    2. Pexels/Wikimedia/Openverse за назвою команди
     """
-    # Розбиваємо "Team A vs Team B" → пробуємо спочатку першу команду
+    # 1. Спробуємо фото команди з API
+    if fixture:
+        img = get_team_image_from_fixture(fixture)
+        if img:
+            return img
+
+    # 2. Пошук за назвою команди
     parts = re.split(r' vs\.? ', fixture_name, flags=re.IGNORECASE)
     team1 = parts[0].strip() if parts else fixture_name
     team2 = parts[1].strip() if len(parts) > 1 else ""
 
-    # Список запитів від конкретного до загального
     queries = [
-        f"{team1} football match",    # "Athletic Club football match"
-        f"{team2} football match",    # "Barcelona football match"
-        f"{team1} {team2}",           # "Athletic Club Barcelona"
-        f"{team1} soccer",            # для Pexels
-        "football match stadium",     # загальний
+        f"{team1} football match",
+        f"{team2} football match",
+        f"{team1} soccer",
+        "football match stadium",
     ]
 
     for q in queries:
@@ -682,7 +705,7 @@ def process_fixture(fixture):
         if preview:
             post += f"\n{preview}"
 
-        image_url = get_image(fixture_name)
+        image_url = get_image(fixture_name, fixture=fixture)
         print(f"🖼 Фото: {image_url}")
 
         # Публікуємо повний текст на Telegraph
@@ -774,6 +797,8 @@ def print_daily_summary(fixtures):
 
 
 def run_all():
+    global _used_images
+    _used_images = set()  # скидаємо використані фото на кожен запуск
     print(f"\n{'='*40}")
     print(f"Запуск: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     fixtures = get_todays_fixtures()
@@ -820,28 +845,14 @@ def run_all():
     fixtures = filtered
     print(f"Матчів з новинами: {len(fixtures)}")
 
-    # Динамічний ліміт: якщо новин багато і мало часу — публікуємо більше за раз
-    now_dyn = datetime.now()
-    urgent = sum(
-        1 for f in fixtures
-        if f.get("starting_at") and
-        now_dyn + timedelta(hours=4) < datetime.strptime(f["starting_at"][:16], "%Y-%m-%d %H:%M") < now_dyn + timedelta(hours=6)
-    )
-    dynamic_limit = MAX_POSTS_PER_RUN + urgent  # +1 за кожен терміновий матч
-    if urgent:
-        print(f"⚡ Терміново: {urgent} матчів через 4-6 годин, ліміт збільшено до {dynamic_limit}")
-
     published_count = 0
     for fixture in fixtures:
-        if published_count >= dynamic_limit:
-            print(f"⏹ Досягнуто ліміт {dynamic_limit} постів за запуск")
-            break
         before = len(published_ids)
         process_fixture(fixture)
         if len(published_ids) > before:
             published_count += 1
 
-    print(f"Готово. Опубліковано: {published_count}. Наступний запуск о 09:00 або 18:00.")
+    print(f"Готово. Опубліковано: {published_count}.")
 
 
 # ========== ЗАПУСК ==========
@@ -854,10 +865,10 @@ if __name__ == "__main__":
     print("📅 Розклад: 09:00 та 18:00 щодня")
     run_all()
 
-    # Кожні 2 години з 06:00 UTC (= 08:00 Київ, UTC+2) до 21:00 UTC (= 23:00 Київ)
-    for hour in range(6, 22, 2):
+    # Кожну годину з 06:00 до 21:00 UTC
+    for hour in range(6, 22):
         schedule.every().day.at(f"{hour:02d}:00").do(run_all)
-    print(f"📅 Розклад: кожні 2 години з 06:00 до 20:00 UTC (08:00-22:00 Київ)")
+    print(f"📅 Розклад: щогодини з 06:00 до 21:00 UTC (08:00-23:00 Київ)")
 
     while True:
         try:
