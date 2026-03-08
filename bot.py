@@ -189,7 +189,7 @@ def get_image_google(query):
             params={
                 "key": api_key,
                 "cx": cx,
-                "q": f"{query} {year}",
+                "q": f"{team1} OR {team2} football player match {year} -camera -equipment -stadium -empty",
                 "searchType": "image",
                 "num": 5,
                 "imgType": "photo",
@@ -342,7 +342,11 @@ def get_image(fixture_name, fixture=None):
     year = datetime.now().year
 
     # 1. Google — найрелевантніші свіжі фото
-    for q in [f"{search1} {year}", f"{search2} {year}", f"{team1} {team2} match {year}"]:
+    for q in [
+    f"{team1} football player {year}",
+    f"{team2} football player {year}",
+    f"{team1} vs {team2} match action {year}"
+]:
         if not q.strip():
             continue
         print(f"  🔍 Google: '{q}'")
@@ -756,3 +760,4 @@ if __name__ == "__main__":
         except KeyboardInterrupt:
             print("\nЗупинка бота.")
             break
+
