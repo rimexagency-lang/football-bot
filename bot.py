@@ -348,6 +348,43 @@ def get_team_image_from_fixture(fixture):
     return None
 
 
+def get_image_google(query):
+    """Шукає фото через Google Custom Search API — найрелевантніші результати."""
+    api_key = os.getenv("GOOGLE_SEARCH_KEY")
+    cx = os.getenv("GOOGLE_SEARCH_CX")
+    if not api_key or not cx:
+        return None
+    try:
+        r = requests.get(
+            "https://www.googleapis.com/customsearch/v1",
+            params={
+                "key": api_key,
+                "cx": cx,
+                "q": query,
+                "searchType": "image",
+                "num": 5,
+                "imgType": "photo",
+                "imgSize": "large",
+                "safe": "active"
+            },
+            timeout=10
+        )
+        if r.status_code != 200:
+            print(f"  [Google] помилка: {r.status_code}")
+            return None
+        items = r.json().get("items", [])
+        for item in items:
+            url = item.get("link", "")
+            if url and url.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+                if url not in _used_images:
+                    _used_images.add(url)
+                    print(f"✅ Google: {url}")
+                    return url
+    except Exception as e:
+        print(f"  [Google] помилка: {e}")
+    return None
+
+
 def get_image_pexels(query):
     """Шукає фото через Pexels API — якісні спортивні фото."""
     import random
@@ -390,32 +427,36 @@ def get_image(fixture_name, fixture=None):
     search1 = TEAM_SEARCH_NAMES.get(team1, f"{team1} football")
     search2 = TEAM_SEARCH_NAMES.get(team2, f"{team2} football") if team2 else ""
 
-    queries = [
-        search1,
-        search2,
-        f"{team1} {team2} match",
-        "football stadium crowd",
-        "soccer match action",
-    ]
-
-    for q in queries:
+    # 1. Google Image Search — найрелевантніші фото
+    for q in [search1, search2, f"{team1} {team2} football"]:
         if not q:
             continue
-        print(f"  🔍 Шукаємо фото: '{q}'")
-
-        img = get_image_pexels(q)
+        print(f"  🔍 Google: '{q}'")
+        img = get_image_google(q)
         if img:
             return img
 
-        img = get_image_pixabay(q)
-        if img:
-            return img
-
+    # 2. Wikimedia
+    for q in [search1, search2]:
+        if not q:
+            continue
         img = get_image_wikimedia(q)
         if img:
             return img
 
-        img = get_image_openverse(q)
+    # 3. Pexels
+    for q in [search1, search2]:
+        if not q:
+            continue
+        img = get_image_pexels(q)
+        if img:
+            return img
+
+    # 4. Pixabay
+    for q in [search1, search2]:
+        if not q:
+            continue
+        img = get_image_pixabay(q)
         if img:
             return img
 
