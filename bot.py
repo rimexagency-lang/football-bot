@@ -614,9 +614,12 @@ def process_fixture(fixture):
         except:
             pass
 
-    # Преметч — тільки якщо до матчу більше 4 годин
+    # Преметч — сьогодні за 2+ години, інші дні за 4+ години
     prematch = []
-    if match_dt is None or match_dt > now_check + timedelta(hours=4):
+    today_check = now_check.strftime("%Y-%m-%d")
+    match_date_check = match_dt.strftime("%Y-%m-%d") if match_dt else today_check
+    pre_threshold = timedelta(hours=2) if match_date_check == today_check else timedelta(hours=4)
+    if match_dt is None or match_dt > now_check + pre_threshold:
         prematch = [("pre", n) for n in fixture.get("prematchnews", [])]
 
     # Постматч — тільки якщо матч вже закінчився
@@ -807,9 +810,12 @@ def run_all():
         match_time = datetime.strptime(f["starting_at"][:16], "%Y-%m-%d %H:%M")
         has_prematch = bool(f.get("prematchnews"))
         has_postmatch = bool(f.get("postmatchnews"))
-        # Преметч — тільки якщо до матчу більше 4 годин
+        # Преметч — сьогодні: за 2+ години, інші дні: за 4+ години
+        match_date = match_time.strftime("%Y-%m-%d")
+        today_date = now.strftime("%Y-%m-%d")
+        prematch_threshold = timedelta(hours=2) if match_date == today_date else timedelta(hours=4)
         # Постматч — тільки якщо матч вже закінчився (за останні 24 години)
-        if (has_prematch and match_time > now + timedelta(hours=4)) or            (has_postmatch and now - timedelta(hours=24) < match_time < now - timedelta(hours=2)):
+        if (has_prematch and match_time > now + prematch_threshold) or            (has_postmatch and now - timedelta(hours=24) < match_time < now - timedelta(hours=2)):
             filtered.append(f)
     fixtures = filtered
     print(f"Матчів з новинами: {len(fixtures)}")
