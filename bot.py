@@ -379,17 +379,9 @@ def get_image_pexels(query):
 
 def get_image(fixture_name, fixture=None):
     """
-    Отримує фото для поста.
-    1. Фото команди з Sportmonks (логотип — завжди релевантний)
-    2. Pexels/Wikimedia/Openverse за назвою команди
+    Отримує фото для поста через Pexels/Wikimedia/Openverse.
     """
-    # 1. Спробуємо фото команди з API
-    if fixture:
-        img = get_team_image_from_fixture(fixture)
-        if img:
-            return img
-
-    # 2. Пошук за назвою команди
+    # Пошук за назвою команди
     parts = re.split(r' vs\.? ', fixture_name, flags=re.IGNORECASE)
     team1 = parts[0].strip() if parts else fixture_name
     team2 = parts[1].strip() if len(parts) > 1 else ""
