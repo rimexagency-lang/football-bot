@@ -427,9 +427,10 @@ def get_image(fixture_name, fixture=None):
     search1 = TEAM_SEARCH_NAMES.get(team1, f"{team1} football")
     search2 = TEAM_SEARCH_NAMES.get(team2, f"{team2} football") if team2 else ""
 
-    # 1. Google Image Search — найрелевантніші фото
-    for q in [search1, search2, f"{team1} {team2} football"]:
-        if not q:
+    # 1. Google Image Search — свіжі фото 2024-2025
+    year = datetime.now().year
+    for q in [f"{search1} {year}", f"{search2} {year}", f"{team1} {team2} match {year}"]:
+        if not q.strip():
             continue
         print(f"  🔍 Google: '{q}'")
         img = get_image_google(q)
