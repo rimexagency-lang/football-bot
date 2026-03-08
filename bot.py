@@ -304,6 +304,36 @@ def get_fallback_image():
     return img
 
 
+# Короткі популярні назви для пошуку фото
+TEAM_SEARCH_NAMES = {
+    "Athletic Club": "Athletic Bilbao",
+    "FC Barcelona": "Barcelona football",
+    "Real Madrid": "Real Madrid football",
+    "Manchester City": "Manchester City football",
+    "Manchester United": "Manchester United football",
+    "Liverpool": "Liverpool football",
+    "Arsenal": "Arsenal football",
+    "Chelsea": "Chelsea football",
+    "Tottenham Hotspur": "Tottenham football",
+    "Paris Saint Germain": "PSG Paris football",
+    "Olympique de Marseille": "Marseille football",
+    "Olympique Lyonnais": "Lyon football",
+    "Bayern Munich": "Bayern Munich football",
+    "FC Bayern München": "Bayern Munich football",
+    "Borussia Dortmund": "Dortmund football",
+    "Juventus": "Juventus football",
+    "AC Milan": "AC Milan football",
+    "Inter": "Inter Milan football",
+    "AS Roma": "Roma football",
+    "Napoli": "Napoli football",
+    "Atletico Madrid": "Atletico Madrid football",
+    "Sevilla": "Sevilla football",
+    "Ajax": "Ajax Amsterdam football",
+    "Benfica": "Benfica football",
+    "Porto": "Porto football",
+}
+
+
 def get_team_image_from_fixture(fixture):
     """Отримує фото команди з даних матчу (Sportmonks participants)."""
     try:
@@ -364,11 +394,16 @@ def get_image(fixture_name, fixture=None):
     team1 = parts[0].strip() if parts else fixture_name
     team2 = parts[1].strip() if len(parts) > 1 else ""
 
+    # Використовуємо популярні назви для кращого пошуку
+    search1 = TEAM_SEARCH_NAMES.get(team1, f"{team1} football")
+    search2 = TEAM_SEARCH_NAMES.get(team2, f"{team2} football") if team2 else ""
+
     queries = [
-        f"{team1} football match",
-        f"{team2} football match",
-        f"{team1} soccer",
-        "football match stadium",
+        search1,
+        search2,
+        f"{team1} {team2} match",
+        "football stadium crowd",
+        "soccer match action",
     ]
 
     for q in queries:
