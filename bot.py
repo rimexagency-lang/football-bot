@@ -49,36 +49,6 @@ FALLBACK_IMAGES = [
 _fallback_index = 0
 _used_images = set()
 
-TEAM_SEARCH_NAMES = {
-    "Athletic Club": "Athletic Bilbao",
-    "FC Barcelona": "Barcelona football",
-    "Real Madrid": "Real Madrid football",
-    "Manchester City": "Manchester City football",
-    "Manchester United": "Manchester United football",
-    "Liverpool": "Liverpool football",
-    "Arsenal": "Arsenal football",
-    "Chelsea": "Chelsea football",
-    "Tottenham Hotspur": "Tottenham football",
-    "Paris Saint Germain": "PSG Paris football",
-    "Olympique de Marseille": "Marseille football",
-    "Olympique Lyonnais": "Lyon football",
-    "Bayern Munich": "Bayern Munich football",
-    "FC Bayern München": "Bayern Munich football",
-    "Borussia Dortmund": "Dortmund football",
-    "Juventus": "Juventus football",
-    "AC Milan": "AC Milan football",
-    "Inter": "Inter Milan football",
-    "AS Roma": "Roma football",
-    "Napoli": "Napoli football",
-    "Atletico Madrid": "Atletico Madrid football",
-    "Sevilla": "Sevilla football",
-    "Ajax": "Ajax Amsterdam football",
-    "Benfica": "Benfica football",
-    "Porto": "Porto football",
-    "Genoa": "Genoa CFC football 2025",
-    "Roma": "AS Roma football 2025",
-}
-
 
 # ========== PUBLISHED IDS ==========
 
@@ -162,7 +132,7 @@ published_ids = cleanup_old_ids(load_published_ids())
 print(f"📦 Завантажено published_ids: {len(published_ids)} записів")
 
 
-# ========== ФУНКЦІЇ ==========
+# ========== ДОПОМІЖНІ ФУНКЦІЇ ==========
 
 def format_form(text):
     def replace_form(match):
@@ -176,26 +146,41 @@ def format_form(text):
     return re.sub(r'\[([WDLU]+)\]', replace_form, text)
 
 
+# ========== ФОТО ==========
+
+def get_team_image_from_fixture(fixture):
+    """Логотип команди з даних Sportmonks."""
+    try:
+        participants = fixture.get("participants", [])
+        for p in participants:
+            img = p.get("image_path") or p.get("logo_path")
+            if img and img.startswith("http"):
+                print(f"✅ Team image: {img}")
+                return img
+    except Exception as e:
+        print(f"  [TeamImage] помилка: {e}")
+    return None
+
+
 def get_image_google(query):
-    """Google Custom Search — тільки свіжі фото."""
+    """Google Custom Search — свіжі фото."""
     api_key = os.getenv("GOOGLE_SEARCH_KEY")
     cx = os.getenv("GOOGLE_SEARCH_CX")
     if not api_key or not cx:
         return None
     try:
-        year = datetime.now().year
         r = requests.get(
             "https://www.googleapis.com/customsearch/v1",
             params={
                 "key": api_key,
                 "cx": cx,
-                "q": f"{team1} OR {team2} football player match {year} -camera -equipment -stadium -empty",
+                "q": query,
                 "searchType": "image",
                 "num": 5,
                 "imgType": "photo",
                 "imgSize": "large",
                 "safe": "active",
-                "dateRestrict": "m6",  # тільки за останні 6 місяців
+                "dateRestrict": "m6",
             },
             timeout=10
         )
@@ -216,7 +201,7 @@ def get_image_google(query):
 
 
 def get_image_wikimedia(query):
-    """Wikimedia Commons — тільки спортивні фото."""
+    """Wikimedia Commons — тільки сучасні спортивні фото."""
     try:
         BAD_KEYWORDS = [
             ".pdf", ".ogv", ".svg", ".tif", ".gif",
@@ -262,66 +247,6 @@ def get_image_wikimedia(query):
     return None
 
 
-def get_image_openverse(query):
-    """Openverse — безкоштовно без ключів."""
-    try:
-        clean_query = query.replace(" vs ", " ").replace(" vs. ", " ")
-        r = requests.get(
-            "https://api.openverse.org/v1/images/",
-            params={
-                "q": f"{clean_query} football",
-                "page_size": 5,
-                "license_type": "commercial",
-            },
-            headers={"User-Agent": "FootballNewsBot/1.0"},
-            timeout=10
-        )
-        r.raise_for_status()
-        results = r.json().get("results", [])
-        for item in results:
-            url = item.get("url", "")
-            if url and url.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
-                print(f"✅ Openverse: {url}")
-                return url
-    except Exception as e:
-        print(f"  [Openverse] помилка: {e}")
-    return None
-
-
-def get_image_pexels(query):
-    """Pexels — якісні спортивні фото."""
-    import random
-    token = os.getenv("PEXELS_TOKEN")
-    if not token:
-        return None
-    try:
-        page = random.randint(1, 3)
-        r = requests.get(
-            "https://api.pexels.com/v1/search",
-            headers={"Authorization": token},
-            params={
-                "query": query,
-                "per_page": 10,
-                "orientation": "landscape",
-                "page": page
-            },
-            timeout=10
-        )
-        if r.status_code != 200:
-            return None
-        photos = r.json().get("photos", [])
-        random.shuffle(photos)
-        for photo in photos:
-            url = photo.get("src", {}).get("large") or photo.get("src", {}).get("original")
-            if url and url not in _used_images:
-                _used_images.add(url)
-                print(f"✅ Pexels: {url}")
-                return url
-    except Exception as e:
-        print(f"  [Pexels] помилка: {e}")
-    return None
-
-
 def get_fallback_image():
     global _fallback_index
     img = FALLBACK_IMAGES[_fallback_index % len(FALLBACK_IMAGES)]
@@ -331,25 +256,45 @@ def get_fallback_image():
 
 
 def get_image(fixture_name, fixture=None):
-    # Просто шукаємо по назві матчу
+    """
+    Порядок пошуку фото:
+    1. Google — по назві матчу
+    2. Wikimedia
+    3. Логотип команди з Sportmonks
+    4. Fallback
+    """
     year = datetime.now().year
-    
+
+    # 1. Google — пошук по назві матчу
     for q in [
-        f"{fixture_name} {year}",           # "Galatasaray vs Liverpool 2026"
-        f"{fixture_name} Champions League", # "Galatasaray vs Liverpool Champions League"
-        fixture_name,                        # "Galatasaray vs Liverpool"
+        f"{fixture_name} {year}",
+        f"{fixture_name} Champions League",
+        fixture_name,
     ]:
         print(f"  🔍 Google: '{q}'")
         img = get_image_google(q)
         if img:
             return img
 
-    # Fallback — логотип команди
+    # 2. Wikimedia
+    parts = re.split(r' vs\.? ', fixture_name, flags=re.IGNORECASE)
+    team1 = parts[0].strip() if parts else fixture_name
+    team2 = parts[1].strip() if len(parts) > 1 else ""
+
+    for q in [team1, team2]:
+        if not q:
+            continue
+        img = get_image_wikimedia(q)
+        if img:
+            return img
+
+    # 3. Логотип команди з Sportmonks
     if fixture:
         img = get_team_image_from_fixture(fixture)
         if img:
             return img
 
+    # 4. Fallback
     return get_fallback_image()
 
 
@@ -522,16 +467,23 @@ def post_to_telegram(text, image_url=None, telegraph_url=None):
                 print("📤 Відправлено як фото+підпис")
                 return
 
-            # Якщо URL не спрацював — скачуємо і відправляємо файлом
+            # Скачуємо і відправляємо файлом
             print(f"⚠️ sendPhoto URL помилка. Скачуємо...")
             try:
                 import json as _json
                 img_data = requests.get(image_url, timeout=10).content
                 files = {"photo": ("photo.jpg", img_data, "image/jpeg")}
-                data = {"chat_id": TELEGRAM_CHANNEL, "caption": text, "parse_mode": "HTML"}
+                data = {
+                    "chat_id": TELEGRAM_CHANNEL,
+                    "caption": text,
+                    "parse_mode": "HTML"
+                }
                 if telegraph_url:
                     data["reply_markup"] = _json.dumps({
-                        "inline_keyboard": [[{"text": "📖 Читати повністю", "url": telegraph_url}]]
+                        "inline_keyboard": [[{
+                            "text": "📖 Читати повністю",
+                            "url": telegraph_url
+                        }]]
                     })
                 r2 = requests.post(
                     f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
@@ -546,7 +498,6 @@ def post_to_telegram(text, image_url=None, telegraph_url=None):
             _send_as_text(text, None, telegraph_url)
 
         elif image_url and len(text) > CAPTION_LIMIT:
-            # Фото окремо, потім текст
             requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
                 json={"chat_id": TELEGRAM_CHANNEL, "photo": image_url},
@@ -732,5 +683,3 @@ if __name__ == "__main__":
         except KeyboardInterrupt:
             print("\nЗупинка бота.")
             break
-
-
