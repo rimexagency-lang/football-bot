@@ -1,7 +1,9 @@
 import os
+import sys
 import json
 import time
 import re
+import signal
 import requests
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -61,10 +63,10 @@ def _load_from_gist():
             content_str = files.get("published_ids.json", {}).get("content", "")
             if content_str:
                 data = json.loads(content_str)
-                print(f"📦 Завантажено {len(data)} ID з GitHub Gist")
+                print(f"📦 Завантажено {len(data)} ID з GitHub Gist", flush=True)
                 return data
     except Exception as e:
-        print(f"⚠️ Gist помилка: {e}")
+        print(f"⚠️ Gist помилка: {e}", flush=True)
     return {}
 
 
@@ -85,7 +87,7 @@ def load_published_ids():
             if isinstance(data, list):
                 today = datetime.now().strftime("%Y-%m-%d")
                 return {str(i): today for i in data}
-            print(f"📦 Завантажено {len(data)} ID з файлу")
+            print(f"📦 Завантажено {len(data)} ID з файлу", flush=True)
             return data
         except Exception:
             pass
@@ -97,7 +99,7 @@ def save_published_ids(published_dict):
         with open(PUBLISHED_FILE, "w", encoding="utf-8") as f:
             json.dump(published_dict, f)
     except Exception as e:
-        print(f"⚠️ Файл: {e}")
+        print(f"⚠️ Файл: {e}", flush=True)
 
     gist_id = os.getenv("GIST_ID")
     github_token = os.getenv("GITHUB_TOKEN")
@@ -113,9 +115,9 @@ def save_published_ids(published_dict):
                 timeout=10
             )
             if r.status_code == 200:
-                print(f"☁️ Gist збережено ({len(published_dict)} ID)")
+                print(f"☁️ Gist збережено ({len(published_dict)} ID)", flush=True)
         except Exception as e:
-            print(f"⚠️ Gist помилка: {e}")
+            print(f"⚠️ Gist помилка: {e}", flush=True)
 
 
 def cleanup_old_ids(published_dict, days=7):
@@ -123,12 +125,12 @@ def cleanup_old_ids(published_dict, days=7):
     cleaned = {k: v for k, v in published_dict.items() if v >= cutoff}
     removed = len(published_dict) - len(cleaned)
     if removed:
-        print(f"🧹 Видалено старих ID: {removed}")
+        print(f"🧹 Видалено старих ID: {removed}", flush=True)
     return cleaned
 
 
 published_ids = cleanup_old_ids(load_published_ids())
-print(f"📦 Активних published_ids: {len(published_ids)}")
+print(f"📦 Активних published_ids: {len(published_ids)}", flush=True)
 
 
 # ========== ДОПОМІЖНІ ФУНКЦІЇ ==========
@@ -146,7 +148,6 @@ def format_form(text):
 
 
 def to_kyiv_str(starting_at):
-    """Конвертує UTC рядок у час за Києвом."""
     if not starting_at:
         return ""
     try:
@@ -161,7 +162,6 @@ def to_kyiv_str(starting_at):
 # ========== ФОТО ==========
 
 def get_image(fixture):
-    """Логотип home команди → away команди → ліги → fallback."""
     global _fallback_index
 
     participants = fixture.get("participants", [])
@@ -173,18 +173,18 @@ def get_image(fixture):
     for p in sorted_p:
         img = p.get("image_path") or p.get("logo_path")
         if img and img.startswith("http"):
-            print(f"✅ Логотип команди: {img}")
+            print(f"✅ Логотип команди: {img}", flush=True)
             return img
 
     league = fixture.get("league") or {}
     img = league.get("image_path") or league.get("logo_path")
     if img and img.startswith("http"):
-        print(f"✅ Логотип ліги: {img}")
+        print(f"✅ Логотип ліги: {img}", flush=True)
         return img
 
     img = FALLBACK_IMAGES[_fallback_index % len(FALLBACK_IMAGES)]
     _fallback_index += 1
-    print(f"⚠️ Fallback: {img}")
+    print(f"⚠️ Fallback: {img}", flush=True)
     return img
 
 
@@ -208,7 +208,7 @@ def get_fixtures():
             params["page"] = page
             r = requests.get(url, params=params, timeout=20)
             if r.status_code != 200:
-                print(f"❌ API помилка: {r.status_code}")
+                print(f"❌ API помилка: {r.status_code}", flush=True)
                 break
             resp = r.json()
             all_fixtures.extend(resp.get("data", []))
@@ -219,10 +219,10 @@ def get_fixtures():
                 break
 
         filtered = [f for f in all_fixtures if f.get("league_id") in LEAGUE_IDS]
-        print(f"[{datetime.now().strftime('%H:%M')}] Матчів: {len(filtered)} / {len(all_fixtures)}")
+        print(f"[{datetime.now().strftime('%H:%M')}] Матчів: {len(filtered)} / {len(all_fixtures)}", flush=True)
         return filtered
     except Exception as e:
-        print(f"❌ Помилка отримання матчів: {e}")
+        print(f"❌ Помилка отримання матчів: {e}", flush=True)
         return []
 
 
@@ -240,10 +240,10 @@ def translate(text):
         )
         return r.json()["translations"][0]["text"]
     except requests.exceptions.Timeout:
-        print("⏱ DeepL timeout")
+        print("⏱ DeepL timeout", flush=True)
         return text
     except Exception as e:
-        print(f"⚠️ Переклад: {e}")
+        print(f"⚠️ Переклад: {e}", flush=True)
         return text
 
 
@@ -267,10 +267,10 @@ def get_telegraph_token():
             token = data["result"]["access_token"]
             with open(token_file, "w") as f:
                 f.write(token)
-            print("✅ Telegraph акаунт створено")
+            print("✅ Telegraph акаунт створено", flush=True)
             return token
     except Exception as e:
-        print(f"⚠️ Telegraph: {e}")
+        print(f"⚠️ Telegraph: {e}", flush=True)
     return None
 
 
@@ -301,10 +301,10 @@ def publish_to_telegraph(title, text, image_url=None):
         data = r.json()
         if data.get("ok"):
             url = data["result"]["url"]
-            print(f"✅ Telegraph: {url}")
+            print(f"✅ Telegraph: {url}", flush=True)
             return url
     except Exception as e:
-        print(f"⚠️ Telegraph публікація: {e}")
+        print(f"⚠️ Telegraph публікація: {e}", flush=True)
     return None
 
 
@@ -329,7 +329,7 @@ def send_telegram(text, image_url=None, telegraph_url=None):
             json=payload, timeout=20
         )
         if r.status_code == 200:
-            print("📤 Відправлено фото+підпис")
+            print("📤 Відправлено фото+підпис", flush=True)
             return True
 
         try:
@@ -343,10 +343,10 @@ def send_telegram(text, image_url=None, telegraph_url=None):
                 data=data, files=files, timeout=30
             )
             if r2.status_code == 200:
-                print("📤 Відправлено файлом")
+                print("📤 Відправлено файлом", flush=True)
                 return True
         except Exception as e:
-            print(f"⚠️ Скачування фото: {e}")
+            print(f"⚠️ Скачування фото: {e}", flush=True)
 
     if image_url:
         text = f'<a href="{image_url}">&#8205;</a>' + text
@@ -362,9 +362,9 @@ def send_telegram(text, image_url=None, telegraph_url=None):
         json=payload, timeout=15
     )
     if r.status_code == 200:
-        print("📤 Відправлено текст")
+        print("📤 Відправлено текст", flush=True)
         return True
-    print(f"❌ Telegram помилка: {r.text[:200]}")
+    print(f"❌ Telegram помилка: {r.text[:200]}", flush=True)
     return False
 
 
@@ -437,12 +437,11 @@ def process_fixture(fixture):
                 image_url=image_url
             )
 
-        # Зберігаємо до відправки — захист від дублікатів
         published_ids[str(news_id)] = datetime.now().strftime("%Y-%m-%d")
         save_published_ids(published_ids)
 
         send_telegram(post, image_url=image_url, telegraph_url=telegraph_url)
-        print(f"✅ [{news_type}] {title_ua or fixture_name}")
+        print(f"✅ [{news_type}] {title_ua or fixture_name}", flush=True)
 
         sent += 1
         time.sleep(3)
@@ -453,20 +452,19 @@ def process_fixture(fixture):
 # ========== ГОЛОВНА ФУНКЦІЯ ==========
 
 def run_all():
-    print(f"\n{'='*40}")
-    print(f"Запуск: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"\n{'='*40}", flush=True)
+    print(f"Запуск: {datetime.now().strftime('%Y-%m-%d %H:%M')}", flush=True)
 
     global published_ids
     fresh = _load_from_gist()
     if fresh:
         published_ids.update(fresh)
-        print(f"🔄 published_ids оновлено: {len(published_ids)}")
+        print(f"🔄 published_ids оновлено: {len(published_ids)}", flush=True)
 
     fixtures = get_fixtures()
 
     now = datetime.now()
     today = now.strftime("%Y-%m-%d")
-    yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
 
     relevant = []
     for f in fixtures:
@@ -493,9 +491,9 @@ def run_all():
         else len(PRIORITY_LEAGUES)
     ))
 
-    print(f"Матчів з новинами: {len(relevant)}")
+    print(f"Матчів з новинами: {len(relevant)}", flush=True)
     total = sum(process_fixture(f) for f in relevant)
-    print(f"Готово. Опубліковано: {total}.")
+    print(f"Готово. Опубліковано: {total}.", flush=True)
 
 
 # ========== ЗАПУСК ==========
@@ -504,30 +502,35 @@ def sleep_until_next_hour():
     now = datetime.now()
     next_run = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
     seconds = (next_run - now).total_seconds()
-    print(f"⏰ Наступна перевірка: {next_run.strftime('%Y-%m-%d %H:%M')} UTC")
+    print(f"⏰ Наступна перевірка: {next_run.strftime('%Y-%m-%d %H:%M')} UTC", flush=True)
     while seconds > 0:
         time.sleep(min(30, seconds))
         seconds = (next_run - datetime.now()).total_seconds()
 
 
+def handle_signal(signum, frame):
+    print(f"\n🛑 Сигнал {signum}, зупинка.", flush=True)
+    sys.exit(0)
+
+
 if __name__ == "__main__":
-    print("Бот запущено!")
+    signal.signal(signal.SIGTERM, handle_signal)
+    signal.signal(signal.SIGINT, handle_signal)
+
+    print("Бот запущено!", flush=True)
 
     while True:
         try:
             run_all()
-        except KeyboardInterrupt:
-            print("\nЗупинка.")
+        except SystemExit:
             break
         except Exception as e:
-            print(f"⚠️ Помилка run_all: {e}")
+            print(f"⚠️ Помилка run_all: {e}", flush=True)
 
         try:
             sleep_until_next_hour()
-        except KeyboardInterrupt:
-            print("\nЗупинка.")
+        except SystemExit:
             break
         except Exception as e:
-            print(f"⚠️ Помилка очікування: {e}")
+            print(f"⚠️ Помилка очікування: {e}", flush=True)
             time.sleep(60)
-
