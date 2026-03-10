@@ -3,7 +3,6 @@ import json
 import time
 import re
 import requests
-import schedule
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
@@ -502,7 +501,6 @@ def run_all():
 # ========== ЗАПУСК ==========
 
 def sleep_until_next_hour():
-    """Чекає до початку наступної години."""
     now = datetime.now()
     next_run = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
     seconds = (next_run - now).total_seconds()
@@ -518,11 +516,18 @@ if __name__ == "__main__":
     while True:
         try:
             run_all()
+        except KeyboardInterrupt:
+            print("\nЗупинка.")
+            break
         except Exception as e:
-            print(f"⚠️ Помилка: {e}")
+            print(f"⚠️ Помилка run_all: {e}")
 
         try:
             sleep_until_next_hour()
         except KeyboardInterrupt:
             print("\nЗупинка.")
             break
+        except Exception as e:
+            print(f"⚠️ Помилка очікування: {e}")
+            time.sleep(60)
+
