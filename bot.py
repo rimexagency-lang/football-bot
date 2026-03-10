@@ -3,9 +3,6 @@ import json
 import time
 import re
 import html
-import sys
-import signal
-import atexit
 import mimetypes
 from urllib.parse import urlparse
 from datetime import datetime, timedelta, timezone
@@ -15,10 +12,6 @@ import requests
 from dotenv import load_dotenv
 
 
-# ========== ВЕРСИЯ ==========
-VERSION = "bot-hourly-v5"
-
-
 # ========== НАСТРОЙКИ ==========
 load_dotenv()
 
@@ -26,12 +19,6 @@ SPORTMONKS_TOKEN = os.getenv("SPORTMONKS_TOKEN")
 DEEPL_TOKEN = os.getenv("DEEPL_TOKEN")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHANNEL = os.getenv("TELEGRAM_CHANNEL")
-
-GIST_ID = os.getenv("GIST_ID")
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-
-UTC = timezone.utc
-KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
 LEAGUE_IDS = [
     2, 5,
@@ -53,17 +40,21 @@ LEAGUE_IDS = [
 
 PRIORITY_LEAGUES = [2, 5, 8, 82, 564]
 
-# 0 = публиковать все новые новости за проход
+# 0 = без лимита, публиковать все новые новости за проход
 MAX_POSTS_PER_RUN = 0
+
 TELEGRAM_PAUSE_SECONDS = 5
 PUBLISHED_IDS_KEEP_DAYS = 7
-SPORTMONKS_TIMEOUT = 20
-DEFAULT_TIMEOUT = 15
+
+UTC = timezone.utc
+KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PUBLISHED_FILE = os.path.join(BASE_DIR, "published_ids.json")
 TELEGRAPH_TOKEN_FILE = os.path.join(BASE_DIR, "telegraph_token.txt")
 
+# Поиск картинок через Google/Wikimedia убран специально.
+# Используем только логотипы из SportMonks или fallback.
 FALLBACK_IMAGES = [
     "https://upload.wikimedia.org/wikipedia/commons/thumb/1/1d/Football_Pallo_valmiina-cropped.jpg/640px-Football_Pallo_valmiina-cropped.jpg",
     "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5c/Football_iu_002.jpg/640px-Football_iu_002.jpg",
@@ -72,59 +63,23 @@ FALLBACK_IMAGES = [
 
 _fallback_index = 0
 _used_images = set()
-published_ids = {}
 
 
-# ========== ЛОГИ ==========
+# ========== БАЗОВЫЕ ХЕЛПЕРЫ ==========
+
 def now_utc():
     return datetime.now(UTC)
 
 
-def log(message: str) -> None:
-    ts_utc = now_utc().strftime("%Y-%m-%d %H:%M:%S")
-    ts_kyiv = now_utc().astimezone(KYIV_TZ).strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{ts_utc} UTC | {ts_kyiv} Kyiv] {message}", flush=True)
-
-
-def on_exit():
-    log("🛑 Процес завершується (atexit)")
-
-
-def handle_signal(signum, frame):
-    log(f"🛑 Отримано сигнал завершення: {signum}")
-    sys.exit(0)
-
-
-atexit.register(on_exit)
-signal.signal(signal.SIGTERM, handle_signal)
-signal.signal(signal.SIGINT, handle_signal)
-
-
-# ========== ХЕЛПЕРЫ ==========
-def html_escape(text):
-    return html.escape(text or "", quote=False)
-
-
-def html_escape_attr(text):
-    return html.escape(text or "", quote=True)
-
-
-def strip_html(text):
-    return re.sub(r"<[^>]+>", "", text or "").strip()
-
-
-def safe_truncate(text, max_len=300):
-    clean = strip_html(text)
-    if len(clean) <= max_len:
-        return clean
-
-    short = clean[:max_len].rstrip()
-    if " " in short:
-        short = short.rsplit(" ", 1)[0]
-    return short.rstrip(" .,;:-") + "…"
-
-
 def parse_sportmonks_dt(value):
+    """
+    Возвращает timezone-aware datetime в UTC.
+    Поддерживает форматы:
+    - 2026-03-10 20:00:00
+    - 2026-03-10 20:00
+    - 2026-03-10T20:00:00Z
+    - 2026-03-10T20:00:00+00:00
+    """
     if not value:
         return None
 
@@ -154,7 +109,8 @@ def parse_sportmonks_dt(value):
 
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
         try:
-            return datetime.strptime(raw[:19], fmt).replace(tzinfo=UTC)
+            dt = datetime.strptime(raw[:19], fmt).replace(tzinfo=UTC)
+            return dt
         except ValueError:
             pass
 
@@ -165,6 +121,29 @@ def to_kyiv_str(dt):
     if not dt:
         return ""
     return dt.astimezone(KYIV_TZ).strftime("%d.%m %H:%M")
+
+
+def html_escape(text):
+    return html.escape(text or "", quote=False)
+
+
+def html_escape_attr(text):
+    return html.escape(text or "", quote=True)
+
+
+def strip_html(text):
+    return re.sub(r"<[^>]+>", "", text or "").strip()
+
+
+def safe_truncate(text, max_len=300):
+    clean = strip_html(text)
+    if len(clean) <= max_len:
+        return clean
+
+    short = clean[:max_len].rstrip()
+    if " " in short:
+        short = short.rsplit(" ", 1)[0]
+    return short.rstrip(" .,;:-") + "…"
 
 
 def get_list_relation(obj, *keys):
@@ -190,7 +169,6 @@ def is_supported_image_url(url):
         return False
     if not url.startswith(("http://", "https://")):
         return False
-
     path = urlparse(url).path.lower()
     return path.endswith((".jpg", ".jpeg", ".png", ".webp"))
 
@@ -214,6 +192,7 @@ def format_form(text):
 
 
 # ========== PUBLISHED IDS ==========
+
 def normalize_published_ids(data):
     today = now_utc().strftime("%Y-%m-%d")
 
@@ -234,17 +213,20 @@ def normalize_published_ids(data):
     return {}
 
 
-def load_published_ids_from_gist():
-    if not GIST_ID:
+def _load_from_gist():
+    gist_id = os.getenv("GIST_ID")
+    github_token = os.getenv("GITHUB_TOKEN")
+
+    if not gist_id:
         return {}
 
     try:
         headers = {"Accept": "application/vnd.github+json"}
-        if GITHUB_TOKEN:
-            headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
+        if github_token:
+            headers["Authorization"] = f"Bearer {github_token}"
 
         response = requests.get(
-            f"https://api.github.com/gists/{GIST_ID}",
+            f"https://api.github.com/gists/{gist_id}",
             headers=headers,
             timeout=10
         )
@@ -252,16 +234,15 @@ def load_published_ids_from_gist():
 
         files = response.json().get("files", {})
         content_str = files.get("published_ids.json", {}).get("content", "")
-        if not content_str:
-            return {}
-
-        data = json.loads(content_str)
-        result = normalize_published_ids(data)
-        log(f"📦 Завантажено {len(result)} ID з GitHub Gist")
-        return result
+        if content_str:
+            data = json.loads(content_str)
+            normalized = normalize_published_ids(data)
+            print(f"📦 Завантажено {len(normalized)} ID з GitHub Gist")
+            return normalized
     except Exception as e:
-        log(f"⚠️ Gist помилка завантаження: {e}")
-        return {}
+        print(f"⚠️ Gist помилка завантаження: {e}")
+
+    return {}
 
 
 def load_published_ids():
@@ -269,39 +250,13 @@ def load_published_ids():
         try:
             with open(PUBLISHED_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            result = normalize_published_ids(data)
-            log(f"📦 Завантажено {len(result)} ID з файлу")
-            return result
+            normalized = normalize_published_ids(data)
+            print(f"📦 Завантажено {len(normalized)} ID з файлу")
+            return normalized
         except Exception as e:
-            log(f"⚠️ Помилка читання published_ids.json: {e}")
+            print(f"⚠️ Помилка читання published_ids.json: {e}")
 
-    return load_published_ids_from_gist()
-
-
-def save_published_ids_to_gist(published_dict):
-    if not GIST_ID or not GITHUB_TOKEN:
-        return
-
-    try:
-        response = requests.patch(
-            f"https://api.github.com/gists/{GIST_ID}",
-            headers={
-                "Authorization": f"Bearer {GITHUB_TOKEN}",
-                "Accept": "application/vnd.github+json"
-            },
-            json={
-                "files": {
-                    "published_ids.json": {
-                        "content": json.dumps(published_dict, ensure_ascii=False, indent=2)
-                    }
-                }
-            },
-            timeout=10
-        )
-        response.raise_for_status()
-        log(f"☁️ Backup у GitHub Gist ({len(published_dict)} ID)")
-    except Exception as e:
-        log(f"⚠️ Gist помилка збереження: {e}")
+    return _load_from_gist()
 
 
 def save_published_ids(published_dict):
@@ -309,9 +264,32 @@ def save_published_ids(published_dict):
         with open(PUBLISHED_FILE, "w", encoding="utf-8") as f:
             json.dump(published_dict, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        log(f"⚠️ Помилка запису файлу: {e}")
+        print(f"⚠️ Помилка запису файлу: {e}")
 
-    save_published_ids_to_gist(published_dict)
+    gist_id = os.getenv("GIST_ID")
+    github_token = os.getenv("GITHUB_TOKEN")
+
+    if gist_id and github_token:
+        try:
+            response = requests.patch(
+                f"https://api.github.com/gists/{gist_id}",
+                headers={
+                    "Authorization": f"Bearer {github_token}",
+                    "Accept": "application/vnd.github+json"
+                },
+                json={
+                    "files": {
+                        "published_ids.json": {
+                            "content": json.dumps(published_dict, ensure_ascii=False, indent=2)
+                        }
+                    }
+                },
+                timeout=10
+            )
+            response.raise_for_status()
+            print(f"☁️ Backup у GitHub Gist ({len(published_dict)} ID)")
+        except Exception as e:
+            print(f"⚠️ Gist помилка збереження: {e}")
 
 
 def cleanup_old_ids(published_dict, days=PUBLISHED_IDS_KEEP_DAYS):
@@ -328,31 +306,39 @@ def cleanup_old_ids(published_dict, days=PUBLISHED_IDS_KEEP_DAYS):
 
     removed = len(published_dict) - len(cleaned)
     if removed:
-        log(f"🧹 Видалено старих ID: {removed}")
+        print(f"🧹 Видалено старих ID: {removed}")
 
     return cleaned
 
 
+_loaded_published_ids = load_published_ids()
+published_ids = cleanup_old_ids(_loaded_published_ids)
+if len(published_ids) != len(_loaded_published_ids):
+    save_published_ids(published_ids)
+
+print(f"📦 Активних published_ids: {len(published_ids)}")
+
+
 # ========== ФОТО ==========
+
 def _candidate_image_from_participant(participant):
-    return get_first_value(
-        participant,
-        "image_path", "logo_path", "imagePath", "logoPath"
-    )
+    return get_first_value(participant, "image_path", "logo_path", "imagePath", "logoPath")
 
 
 def _candidate_image_from_league(league):
-    return get_first_value(
-        league,
-        "image_path", "logo_path", "imagePath", "logoPath"
-    )
+    return get_first_value(league, "image_path", "logo_path", "imagePath", "logoPath")
 
 
 def get_image_from_fixture(fixture):
+    """
+    Только актуальные источники:
+    - логотип home/away команды из SportMonks
+    - логотип лиги
+    """
     participants = get_list_relation(fixture, "participants")
     sorted_participants = sorted(
         participants,
-        key=lambda p: 0 if str(get_first_value((p.get("meta") or {}), "location") or "").lower() == "home" else 1
+        key=lambda p: 0 if str(get_first_value(p.get("meta", {}), "location") or "").lower() == "home" else 1
     )
 
     candidates = []
@@ -370,11 +356,11 @@ def get_image_from_fixture(fixture):
     for img in candidates:
         if img not in _used_images:
             _used_images.add(img)
-            log(f"✅ SportMonks image: {img}")
+            print(f"✅ SportMonks image: {img}")
             return img
 
     for img in candidates:
-        log(f"✅ SportMonks image (повтор): {img}")
+        print(f"✅ SportMonks image (повтор): {img}")
         return img
 
     return None
@@ -384,7 +370,7 @@ def get_fallback_image():
     global _fallback_index
     img = FALLBACK_IMAGES[_fallback_index % len(FALLBACK_IMAGES)]
     _fallback_index += 1
-    log(f"⚠️ Fallback фото: {img}")
+    print(f"⚠️ Fallback фото: {img}")
     return img
 
 
@@ -396,7 +382,14 @@ def get_image(fixture):
 
 
 # ========== SPORTMONKS ==========
+
 def get_fixtures_for_news_scan():
+    """
+    Берем матчи:
+    - со вчерашнего дня
+    - до +3 дней вперед
+    Чтобы ловить и postmatch, и prematch новости.
+    """
     start_date = (now_utc() - timedelta(days=1)).strftime("%Y-%m-%d")
     end_date = (now_utc() + timedelta(days=3)).strftime("%Y-%m-%d")
 
@@ -413,35 +406,34 @@ def get_fixtures_for_news_scan():
 
         while True:
             params["page"] = page
-            response = requests.get(url, params=params, timeout=SPORTMONKS_TIMEOUT)
-
+            response = requests.get(url, params=params, timeout=20)
             if response.status_code != 200:
-                log(f"❌ Помилка SportMonks API: {response.status_code} | {response.text[:300]}")
+                print(f"❌ Помилка SportMonks API: {response.status_code} | {response.text[:300]}")
                 break
 
             payload = response.json()
             batch = payload.get("data", [])
             all_fixtures.extend(batch)
 
-            has_more = payload.get("pagination", {}).get("has_more", False)
-            if not has_more:
+            if not payload.get("pagination", {}).get("has_more", False):
                 break
 
             page += 1
             if page > 20:
-                log("⚠️ Досягнуто ліміт пагінації (20 сторінок)")
+                print("⚠️ Досягнуто ліміт пагінації (20 сторінок)")
                 break
 
         filtered = [f for f in all_fixtures if f.get("league_id") in LEAGUE_IDS]
-        log(f"⚽ Матчів після фільтра ліг: {len(filtered)} / {len(all_fixtures)}")
+        print(f"[{now_utc().strftime('%H:%M')}] Матчів після фільтра ліг: {len(filtered)} / {len(all_fixtures)}")
         return filtered
 
     except Exception as e:
-        log(f"❌ Помилка отримання матчів: {e}")
+        print(f"❌ Помилка отримання матчів: {e}")
         return []
 
 
 # ========== ПЕРЕВОД ==========
+
 def translate(text):
     if not text:
         return ""
@@ -453,22 +445,26 @@ def translate(text):
         response = requests.post(
             "https://api-free.deepl.com/v2/translate",
             headers={"Authorization": f"DeepL-Auth-Key {DEEPL_TOKEN}"},
-            data={"text": text, "target_lang": "UK"},
+            data={
+                "text": text,
+                "target_lang": "UK"
+            },
             timeout=15
         )
         response.raise_for_status()
         data = response.json()
         return data["translations"][0]["text"]
     except requests.exceptions.Timeout:
-        log("⏱ DeepL timeout")
+        print("⏱ DeepL timeout")
         return text
     except Exception as e:
-        log(f"⚠️ Помилка перекладу: {e}")
+        print(f"⚠️ Помилка перекладу: {e}")
         return text
 
 
 # ========== TELEGRAPH ==========
-def get_telegraph_token():
+
+def _get_telegraph_token():
     if os.path.exists(TELEGRAPH_TOKEN_FILE):
         try:
             with open(TELEGRAPH_TOKEN_FILE, "r", encoding="utf-8") as f:
@@ -476,7 +472,7 @@ def get_telegraph_token():
             if token:
                 return token
         except Exception as e:
-            log(f"⚠️ Помилка читання telegraph_token.txt: {e}")
+            print(f"⚠️ Помилка читання telegraph_token.txt: {e}")
 
     try:
         response = requests.post(
@@ -494,19 +490,19 @@ def get_telegraph_token():
             token = data["result"]["access_token"]
             with open(TELEGRAPH_TOKEN_FILE, "w", encoding="utf-8") as f:
                 f.write(token)
-            log("✅ Telegraph акаунт створено")
+            print("✅ Telegraph акаунт створено")
             return token
 
-        log(f"⚠️ Telegraph createAccount error: {data}")
-        return None
+        print(f"⚠️ Telegraph createAccount error: {data}")
     except Exception as e:
-        log(f"⚠️ Telegraph помилка: {e}")
-        return None
+        print(f"⚠️ Telegraph помилка: {e}")
+
+    return None
 
 
 def publish_to_telegraph(title, text, image_url=None):
     try:
-        token = get_telegraph_token()
+        token = _get_telegraph_token()
         if not token:
             return None
 
@@ -538,20 +534,28 @@ def publish_to_telegraph(title, text, image_url=None):
 
         if data.get("ok"):
             url = data["result"]["url"]
-            log(f"✅ Telegraph: {url}")
+            print(f"✅ Telegraph: {url}")
             return url
 
-        log(f"⚠️ Telegraph createPage error: {data}")
-        return None
+        print(f"⚠️ Telegraph createPage error: {data}")
     except Exception as e:
-        log(f"⚠️ Telegraph помилка публікації: {e}")
-        return None
+        print(f"⚠️ Telegraph помилка публікації: {e}")
+
+    return None
 
 
 # ========== TELEGRAM ==========
-def telegram_api(method, *, json_payload=None, data=None, files=None, timeout=DEFAULT_TIMEOUT):
+
+def telegram_api(method, *, json_payload=None, data=None, files=None, timeout=15):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/{method}"
-    return requests.post(url, json=json_payload, data=data, files=files, timeout=timeout)
+    response = requests.post(
+        url,
+        json=json_payload,
+        data=data,
+        files=files,
+        timeout=timeout
+    )
+    return response
 
 
 def build_reply_markup(telegraph_url):
@@ -567,6 +571,7 @@ def build_reply_markup(telegraph_url):
 
 def _send_as_text(text, image_url=None, telegraph_url=None):
     message_text = text
+
     if image_url:
         message_text = f'<a href="{html_escape_attr(image_url)}">&#8205;</a>' + message_text
 
@@ -581,13 +586,13 @@ def _send_as_text(text, image_url=None, telegraph_url=None):
     if reply_markup:
         payload["reply_markup"] = reply_markup
 
-    response = telegram_api("sendMessage", json_payload=payload)
+    response = telegram_api("sendMessage", json_payload=payload, timeout=15)
 
     if response.status_code != 200:
-        log(f"❌ sendMessage помилка: {response.text[:500]}")
+        print(f"❌ sendMessage помилка: {response.text[:500]}")
         return False
 
-    log("📤 Відправлено як текст")
+    print("📤 Відправлено як текст")
     return True
 
 
@@ -622,11 +627,11 @@ def post_to_telegram(text, image_url=None, telegraph_url=None):
 
             response = telegram_api("sendPhoto", json_payload=payload, timeout=20)
             if response.status_code == 200:
-                log("📤 Відправлено як фото+підпис")
+                print("📤 Відправлено як фото+підпис")
                 return True
 
-            log(f"⚠️ sendPhoto URL помилка: {response.text[:300]}")
-            log("⚠️ Пробуємо скачати фото і відправити файлом...")
+            print(f"⚠️ sendPhoto URL помилка: {response.text[:300]}")
+            print("⚠️ Пробуємо скачати фото і відправити файлом...")
 
             try:
                 filename, mime, content = _download_image_for_upload(image_url)
@@ -639,37 +644,51 @@ def post_to_telegram(text, image_url=None, telegraph_url=None):
                 if reply_markup:
                     data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
 
-                response2 = telegram_api("sendPhoto", data=data, files=files, timeout=30)
+                response2 = telegram_api(
+                    "sendPhoto",
+                    data=data,
+                    files=files,
+                    timeout=30
+                )
                 if response2.status_code == 200:
-                    log("📤 Відправлено як завантажений файл")
+                    print("📤 Відправлено як завантажений файл")
                     return True
 
-                log(f"❌ sendPhoto(file) помилка: {response2.text[:300]}")
+                print(f"❌ sendPhoto(file) помилка: {response2.text[:300]}")
             except Exception as e:
-                log(f"⚠️ Помилка скачування/відправки фото: {e}")
+                print(f"⚠️ Помилка скачування/відправки фото: {e}")
 
             return _send_as_text(text, None, telegraph_url)
 
         if image_url and len(text) > caption_limit:
-            payload = {"chat_id": TELEGRAM_CHANNEL, "photo": image_url}
+            payload = {
+                "chat_id": TELEGRAM_CHANNEL,
+                "photo": image_url
+            }
             response = telegram_api("sendPhoto", json_payload=payload, timeout=20)
 
             if response.status_code != 200:
-                log(f"⚠️ sendPhoto без підпису помилка: {response.text[:300]}")
+                print(f"⚠️ sendPhoto без підпису помилка: {response.text[:300]}")
             else:
-                log("📤 Фото відправлено окремо")
+                print("📤 Фото відправлено окремо")
 
             return _send_as_text(text, None, telegraph_url)
 
         return _send_as_text(text, image_url, telegraph_url)
 
     except Exception as e:
-        log(f"❌ Помилка відправки в Telegram: {e}")
+        print(f"❌ Помилка відправки в Telegram: {e}")
         return False
 
 
 # ========== ЛОГИКА НОВОСТЕЙ ==========
+
 def classify_news_for_fixture(fixture):
+    """
+    Возвращает список новостей, которые сейчас релевантны для публикации:
+    - prematch: если матч начнется более чем через 2 часа
+    - postmatch: если матч уже прошел минимум 2 часа назад, но не более 24 часов назад
+    """
     now = now_utc()
     match_dt = parse_sportmonks_dt(fixture.get("starting_at"))
 
@@ -680,32 +699,13 @@ def classify_news_for_fixture(fixture):
 
     if prematch_list:
         if match_dt is None or match_dt > now + timedelta(hours=2):
-            news_items.extend([("pre", item) for item in prematch_list])
+            news_items.extend([("pre", n) for n in prematch_list])
 
     if postmatch_list and match_dt is not None:
         if now - timedelta(hours=24) < match_dt < now - timedelta(hours=2):
-            news_items.extend([("post", item) for item in postmatch_list])
+            news_items.extend([("post", n) for n in postmatch_list])
 
     return news_items
-
-
-def build_post_text(fixture_name, league_name, match_dt, news_type, title_ua, preview):
-    type_label = "📊 Підсумок матчу" if news_type == "post" else "🔮 Прев'ю матчу"
-    kyiv_time_str = to_kyiv_str(match_dt)
-
-    parts = [
-        f"📌 <b>{html_escape(fixture_name)}</b>",
-        f"⚽ {html_escape(league_name)} • 🗓 {html_escape(kyiv_time_str)} за Києвом",
-        type_label
-    ]
-
-    if title_ua:
-        parts.append(f"<b>{html_escape(title_ua)}</b>")
-
-    if preview:
-        parts.append(html_escape(preview))
-
-    return "\n\n".join(part for part in parts if part)
 
 
 def process_fixture(fixture, remaining_slots=None):
@@ -716,7 +716,7 @@ def process_fixture(fixture, remaining_slots=None):
     news_items = classify_news_for_fixture(fixture)
 
     if not news_items:
-        log(f"Немає релевантних новин для: {fixture_name}")
+        print(f"Немає релевантних новин для: {fixture_name}")
         return 0
 
     sent_count = 0
@@ -731,7 +731,6 @@ def process_fixture(fixture, remaining_slots=None):
 
         news_id_str = str(news_id)
         if news_id_str in published_ids:
-            log(f"⏭ Уже публікувалось: {fixture_name} | news_id={news_id_str}")
             continue
 
         title = (news.get("title") or "").strip()
@@ -747,22 +746,31 @@ def process_fixture(fixture, remaining_slots=None):
             line_text = (line.get("text") or "").strip()
             if not line_text:
                 continue
-            lines_ua.append(format_form(translate(line_text)))
+            translated = format_form(translate(line_text))
+            lines_ua.append(translated)
 
         full_text = "\n\n".join(lines_ua).strip()
         preview = safe_truncate(full_text, max_len=300) if full_text else ""
 
-        post_text = build_post_text(
-            fixture_name=fixture_name,
-            league_name=league_name,
-            match_dt=match_dt,
-            news_type=news_type,
-            title_ua=title_ua,
-            preview=preview
-        )
+        type_label = "📊 Підсумок матчу" if news_type == "post" else "🔮 Прев'ю матчу"
+        kyiv_time_str = to_kyiv_str(match_dt)
+
+        post_parts = [
+            f"📌 <b>{html_escape(fixture_name)}</b>",
+            f"⚽ {html_escape(league_name)} • 🗓 {html_escape(kyiv_time_str)} за Києвом",
+            type_label
+        ]
+
+        if title_ua:
+            post_parts.append(f"<b>{html_escape(title_ua)}</b>")
+
+        if preview:
+            post_parts.append(html_escape(preview))
+
+        post_text = "\n\n".join(part for part in post_parts if part)
 
         image_url = get_image(fixture)
-        log(f"🖼 Фото: {image_url}")
+        print(f"🖼 Фото: {image_url}")
 
         telegraph_url = None
         if full_text:
@@ -772,18 +780,14 @@ def process_fixture(fixture, remaining_slots=None):
                 image_url=image_url
             )
 
-        sent_ok = post_to_telegram(
-            text=post_text,
-            image_url=image_url,
-            telegraph_url=telegraph_url
-        )
+        sent_ok = post_to_telegram(post_text, image_url=image_url, telegraph_url=telegraph_url)
         if not sent_ok:
             continue
 
         published_ids[news_id_str] = now_utc().strftime("%Y-%m-%d")
         save_published_ids(published_ids)
 
-        log(f"✅ Опубліковано [{news_type}]: {title_ua or fixture_name}")
+        print(f"✅ Опубліковано [{news_type}]: {title_ua or fixture_name}")
 
         sent_count += 1
         time.sleep(TELEGRAM_PAUSE_SECONDS)
@@ -791,27 +795,33 @@ def process_fixture(fixture, remaining_slots=None):
     return sent_count
 
 
-# ========== ОСНОВНОЙ ПРОХОД ==========
+# ========== ГЛАВНАЯ ФУНКЦИЯ ==========
+
 def run_all():
     global _used_images
     _used_images = set()
 
     if not SPORTMONKS_TOKEN or not TELEGRAM_TOKEN or not TELEGRAM_CHANNEL:
-        log("❌ Не вистачає обов'язкових змінних: SPORTMONKS_TOKEN / TELEGRAM_TOKEN / TELEGRAM_CHANNEL")
+        print("❌ Не вистачає обов'язкових змінних: SPORTMONKS_TOKEN / TELEGRAM_TOKEN / TELEGRAM_CHANNEL")
         return
 
-    log("=" * 50)
-    log(f"Запуск перевірки новин | VERSION={VERSION}")
+    print("\n" + "=" * 50)
+    print(f"Запуск перевірки: {now_utc().strftime('%Y-%m-%d %H:%M:%S')} UTC")
 
     fixtures = get_fixtures_for_news_scan()
     if not fixtures:
-        log("Немає матчів для перевірки.")
+        print("Немає матчів для перевірки.")
         return
 
     def fixture_sort_key(fixture):
         league_id = fixture.get("league_id", 9999)
         match_dt = parse_sportmonks_dt(fixture.get("starting_at")) or now_utc()
-        priority = PRIORITY_LEAGUES.index(league_id) if league_id in PRIORITY_LEAGUES else len(PRIORITY_LEAGUES)
+
+        if league_id in PRIORITY_LEAGUES:
+            priority = PRIORITY_LEAGUES.index(league_id)
+        else:
+            priority = len(PRIORITY_LEAGUES)
+
         return (priority, match_dt, fixture.get("name", ""))
 
     fixtures.sort(key=fixture_sort_key)
@@ -829,15 +839,16 @@ def run_all():
         if remaining is not None:
             remaining -= sent_now
 
-    log(f"Готово. Нових новин опубліковано: {total_sent}.")
+    print(f"Готово. Нових новин опубліковано: {total_sent}.")
 
 
-# ========== ОЖИДАНИЕ ДО СЛЕДУЮЩЕГО ЧАСА ==========
+# ========== ЦИКЛ КАЖДЫЙ ЧАС ==========
+
 def sleep_until_next_hour():
     now = now_utc()
     next_run = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
 
-    log(
+    print(
         "⏰ Наступна перевірка: "
         f"{next_run.strftime('%Y-%m-%d %H:%M:%S')} UTC | "
         f"{next_run.astimezone(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S')} за Києвом"
@@ -846,47 +857,29 @@ def sleep_until_next_hour():
     while True:
         remaining = (next_run - now_utc()).total_seconds()
         if remaining <= 0:
-            log("⏳ Час наступної перевірки настав")
             break
-
-        sleep_for = min(300, remaining)
-        log(f"💤 Очікування {int(sleep_for)} сек. до наступної перевірки")
-        time.sleep(sleep_for)
-
-
-# ========== ИНИЦИАЛИЗАЦИЯ ==========
-def initialize_state():
-    global published_ids
-
-    loaded = load_published_ids()
-    cleaned = cleanup_old_ids(loaded)
-
-    if len(cleaned) != len(loaded):
-        save_published_ids(cleaned)
-
-    published_ids = cleaned
-    log(f"📦 Активних published_ids: {len(published_ids)}")
+        time.sleep(min(30, remaining))
 
 
 # ========== ЗАПУСК ==========
+
 if __name__ == "__main__":
-    initialize_state()
-    log(f"Бот запущено! VERSION={VERSION}")
+    print("Бот запущено!")
 
     while True:
         try:
             run_all()
         except KeyboardInterrupt:
-            log("Зупинка бота.")
+            print("\nЗупинка бота.")
             break
         except Exception as e:
-            log(f"⚠️ Помилка під час run_all(): {e}")
+            print(f"⚠️ Помилка під час run_all(): {e}")
 
         try:
             sleep_until_next_hour()
         except KeyboardInterrupt:
-            log("Зупинка бота.")
+            print("\nЗупинка бота.")
             break
         except Exception as e:
-            log(f"⚠️ Помилка в циклі очікування: {e}")
+            print(f"⚠️ Помилка в циклі очікування: {e}")
             time.sleep(30)
