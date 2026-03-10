@@ -6,13 +6,14 @@ import html
 import mimetypes
 from urllib.parse import urlparse
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import requests
 import schedule
 from dotenv import load_dotenv
 
 
-# ========== НАЛАШТУВАННЯ ==========
+# ========== НАСТРОЙКИ ==========
 load_dotenv()
 
 SPORTMONKS_TOKEN = os.getenv("SPORTMONKS_TOKEN")
@@ -39,21 +40,24 @@ LEAGUE_IDS = [
 ]
 
 PRIORITY_LEAGUES = [2, 5, 8, 82, 564]
-MAX_POSTS_PER_RUN = 3
+
+# 0 = без лимита, отправлять все новые новости
+MAX_POSTS_PER_RUN = 0
+
 TELEGRAM_PAUSE_SECONDS = 5
 PUBLISHED_IDS_KEEP_DAYS = 7
-RUN_HOURS_UTC = set(range(6, 22))  # 06:00-21:59 UTC
+
+UTC = timezone.utc
+KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PUBLISHED_FILE = os.path.join(BASE_DIR, "published_ids.json")
 TELEGRAPH_TOKEN_FILE = os.path.join(BASE_DIR, "telegraph_token.txt")
 
-# Google/Wikimedia пошук вимкнено навмисно:
-# він часто дає старі або нерелевантні фото.
-# Тепер бот бере лише:
-# 1) логотипи команд із SportMonks
-# 2) логотип ліги з SportMonks
-# 3) нейтральний fallback
+# Google/Wikimedia отключены специально:
+# они часто подбирают старые/нерелевантные фото.
+# Используем только логотипы команд/лиги из SportMonks
+# или нейтральный fallback.
 FALLBACK_IMAGES = [
     "https://upload.wikimedia.org/wikipedia/commons/thumb/1/1d/Football_Pallo_valmiina-cropped.jpg/640px-Football_Pallo_valmiina-cropped.jpg",
     "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5c/Football_iu_002.jpg/640px-Football_iu_002.jpg",
@@ -64,16 +68,16 @@ _fallback_index = 0
 _used_images = set()
 
 
-# ========== БАЗОВІ ДОПОМІЖНІ ФУНКЦІЇ ==========
+# ========== БАЗОВЫЕ ХЕЛПЕРЫ ==========
 
 def now_utc():
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def parse_sportmonks_dt(value):
     """
-    Повертає timezone-aware datetime у UTC.
-    Підтримує:
+    Возвращает timezone-aware datetime в UTC.
+    Поддерживает:
     - 2026-03-10 20:00:00
     - 2026-03-10 20:00
     - 2026-03-10T20:00:00Z
@@ -101,19 +105,25 @@ def parse_sportmonks_dt(value):
         try:
             dt = datetime.fromisoformat(candidate)
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt.astimezone(timezone.utc)
+                dt = dt.replace(tzinfo=UTC)
+            return dt.astimezone(UTC)
         except ValueError:
             pass
 
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
         try:
-            dt = datetime.strptime(raw[:19], fmt).replace(tzinfo=timezone.utc)
+            dt = datetime.strptime(raw[:19], fmt).replace(tzinfo=UTC)
             return dt
         except ValueError:
             pass
 
     return None
+
+
+def to_kyiv_str(dt):
+    if not dt:
+        return ""
+    return dt.astimezone(KYIV_TZ).strftime("%d.%m %H:%M")
 
 
 def html_escape(text):
@@ -324,9 +334,9 @@ def _candidate_image_from_league(league):
 
 def get_image_from_fixture(fixture):
     """
-    Лише актуальні та безпечні джерела:
-    - логотип home/away команди з SportMonks
-    - логотип ліги
+    Только актуальные источники:
+    - логотип home/away команды из SportMonks
+    - логотип лиги
     """
     participants = get_list_relation(fixture, "participants")
     sorted_participants = sorted(
@@ -376,7 +386,13 @@ def get_image(fixture):
 
 # ========== SPORTMONKS ==========
 
-def get_todays_fixtures():
+def get_fixtures_for_news_scan():
+    """
+    Берем матчи:
+    - со вчерашнего дня
+    - до +3 дней вперед
+    Чтобы ловить и postmatch, и prematch новости.
+    """
     start_date = (now_utc() - timedelta(days=1)).strftime("%Y-%m-%d")
     end_date = (now_utc() + timedelta(days=3)).strftime("%Y-%m-%d")
 
@@ -419,7 +435,7 @@ def get_todays_fixtures():
         return []
 
 
-# ========== ПЕРЕКЛАД ==========
+# ========== ПЕРЕВОД ==========
 
 def translate(text):
     if not text:
@@ -668,41 +684,48 @@ def post_to_telegram(text, image_url=None, telegraph_url=None):
         return False
 
 
-# ========== ОБРОБКА МАТЧІВ ==========
+# ========== ЛОГИКА НОВОСТЕЙ ==========
 
-def process_fixture(fixture, remaining_slots):
-    fixture_name = fixture.get("name", "Невідомий матч")
-    league_name = (fixture.get("league", {}) or {}).get("name", "")
-    starting_at = fixture.get("starting_at", "")
-
-    now_check = now_utc()
-    match_dt = parse_sportmonks_dt(starting_at)
-
-    today_check = now_check.date()
-    match_date_check = match_dt.date() if match_dt else today_check
-    pre_threshold = timedelta(hours=2) if match_date_check == today_check else timedelta(hours=4)
+def classify_news_for_fixture(fixture):
+    """
+    Возвращает список новостей, которые сейчас релевантны для публикации:
+    - prematch: если матч начнется более чем через 2 часа
+    - postmatch: если матч уже прошел минимум 2 часа назад, но не более 24 часов назад
+    """
+    now = now_utc()
+    match_dt = parse_sportmonks_dt(fixture.get("starting_at"))
 
     prematch_list = get_list_relation(fixture, "prematchnews", "prematchNews")
     postmatch_list = get_list_relation(fixture, "postmatchnews", "postmatchNews")
 
-    prematch = []
-    if match_dt is None or match_dt > now_check + pre_threshold:
-        prematch = [("pre", n) for n in prematch_list]
+    news_items = []
 
-    postmatch = []
-    if match_dt is not None and match_dt < now_check - timedelta(hours=2):
-        postmatch = [("post", n) for n in postmatch_list]
+    if prematch_list:
+        if match_dt is None or match_dt > now + timedelta(hours=2):
+            news_items.extend([("pre", n) for n in prematch_list])
 
-    news_items = prematch + postmatch
+    if postmatch_list and match_dt is not None:
+        if now - timedelta(hours=24) < match_dt < now - timedelta(hours=2):
+            news_items.extend([("post", n) for n in postmatch_list])
+
+    return news_items
+
+
+def process_fixture(fixture, remaining_slots=None):
+    fixture_name = fixture.get("name", "Невідомий матч")
+    league_name = (fixture.get("league", {}) or {}).get("name", "")
+    match_dt = parse_sportmonks_dt(fixture.get("starting_at"))
+
+    news_items = classify_news_for_fixture(fixture)
 
     if not news_items:
-        print(f"Немає новин для: {fixture_name}")
+        print(f"Немає релевантних новин для: {fixture_name}")
         return 0
 
     sent_count = 0
 
     for news_type, news in news_items:
-        if sent_count >= remaining_slots:
+        if remaining_slots is not None and remaining_slots > 0 and sent_count >= remaining_slots:
             break
 
         news_id = news.get("id")
@@ -733,11 +756,11 @@ def process_fixture(fixture, remaining_slots):
         preview = safe_truncate(full_text, max_len=300) if full_text else ""
 
         type_label = "📊 Підсумок матчу" if news_type == "post" else "🔮 Прев'ю матчу"
-        date_str = match_dt.strftime("%d.%m %H:%M") if match_dt else ""
+        kyiv_time_str = to_kyiv_str(match_dt)
 
         post_parts = [
             f"📌 <b>{html_escape(fixture_name)}</b>",
-            f"⚽ {html_escape(league_name)} • 🗓 {html_escape(date_str)} UTC",
+            f"⚽ {html_escape(league_name)} • 🗓 {html_escape(kyiv_time_str)} за Києвом",
             type_label
         ]
 
@@ -770,13 +793,12 @@ def process_fixture(fixture, remaining_slots):
         print(f"✅ Опубліковано [{news_type}]: {title_ua or fixture_name}")
 
         sent_count += 1
-        if sent_count < remaining_slots:
-            time.sleep(TELEGRAM_PAUSE_SECONDS)
+        time.sleep(TELEGRAM_PAUSE_SECONDS)
 
     return sent_count
 
 
-# ========== ГОЛОВНА ФУНКЦІЯ ==========
+# ========== ГЛАВНАЯ ФУНКЦИЯ ==========
 
 def run_all():
     global _used_images
@@ -786,85 +808,41 @@ def run_all():
         print("❌ Не вистачає обов'язкових змінних: SPORTMONKS_TOKEN / TELEGRAM_TOKEN / TELEGRAM_CHANNEL")
         return
 
-    now = now_utc()
-
-    if now.hour not in RUN_HOURS_UTC:
-        print(f"⏭ Пропуск запуску: зараз {now.strftime('%H:%M')} UTC, вікно публікації 06:00-21:59 UTC")
-        return
-
     print("\n" + "=" * 50)
-    print(f"Запуск: {now.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+    print(f"Запуск перевірки: {now_utc().strftime('%Y-%m-%d %H:%M:%S')} UTC")
 
-    fixtures = get_todays_fixtures()
+    fixtures = get_fixtures_for_news_scan()
     if not fixtures:
-        print("Немає матчів для обробки.")
+        print("Немає матчів для перевірки.")
         return
 
-    today = now.date()
-    yesterday = today - timedelta(days=1)
-
-    selected = []
-    for fixture in fixtures:
-        match_dt = parse_sportmonks_dt(fixture.get("starting_at"))
-        if not match_dt:
-            continue
-
-        has_postmatch = bool(get_list_relation(fixture, "postmatchnews", "postmatchNews"))
-
-        if match_dt.date() == today:
-            selected.append(fixture)
-        elif match_dt.date() == yesterday and has_postmatch:
-            selected.append(fixture)
-
-    def league_priority(fixture):
+    def fixture_sort_key(fixture):
         league_id = fixture.get("league_id", 9999)
+        match_dt = parse_sportmonks_dt(fixture.get("starting_at")) or now_utc()
+
         if league_id in PRIORITY_LEAGUES:
-            return PRIORITY_LEAGUES.index(league_id)
-        return len(PRIORITY_LEAGUES)
+            priority = PRIORITY_LEAGUES.index(league_id)
+        else:
+            priority = len(PRIORITY_LEAGUES)
 
-    selected.sort(
-        key=lambda f: (
-            league_priority(f),
-            parse_sportmonks_dt(f.get("starting_at")) or now_utc(),
-            f.get("name", "")
-        )
-    )
+        return (priority, match_dt, fixture.get("name", ""))
 
-    filtered = []
-    for fixture in selected:
-        match_time = parse_sportmonks_dt(fixture.get("starting_at"))
-        if not match_time:
-            continue
+    fixtures.sort(key=fixture_sort_key)
 
-        has_prematch = bool(get_list_relation(fixture, "prematchnews", "prematchNews"))
-        has_postmatch = bool(get_list_relation(fixture, "postmatchnews", "postmatchNews"))
+    total_sent = 0
+    remaining = None if MAX_POSTS_PER_RUN == 0 else MAX_POSTS_PER_RUN
 
-        prematch_threshold = timedelta(hours=2) if match_time.date() == today else timedelta(hours=4)
-
-        should_take = False
-
-        if has_prematch and match_time > now + prematch_threshold:
-            should_take = True
-
-        if has_postmatch and now - timedelta(hours=24) < match_time < now - timedelta(hours=2):
-            should_take = True
-
-        if should_take:
-            filtered.append(fixture)
-
-    print(f"Матчів з релевантними новинами: {len(filtered)}")
-
-    published_count = 0
-
-    for fixture in filtered:
-        if published_count >= MAX_POSTS_PER_RUN:
+    for fixture in fixtures:
+        if remaining is not None and remaining <= 0:
             break
 
-        remaining = MAX_POSTS_PER_RUN - published_count
-        sent_now = process_fixture(fixture, remaining)
-        published_count += sent_now
+        sent_now = process_fixture(fixture, remaining_slots=remaining)
+        total_sent += sent_now
 
-    print(f"Готово. Опубліковано за запуск: {published_count}.")
+        if remaining is not None:
+            remaining -= sent_now
+
+    print(f"Готово. Нових новин опубліковано: {total_sent}.")
 
 
 # ========== ЗАПУСК ==========
@@ -873,9 +851,9 @@ if __name__ == "__main__":
     print("Бот запущено!")
     run_all()
 
-    # Раз на годину. UTC-фільтр перевіряється всередині run_all()
+    # Проверка каждый час
     schedule.every().hour.at(":00").do(run_all)
-    print("📅 Розклад: перевірка щогодини, публікація лише з 06:00 до 21:59 UTC")
+    print("📅 Розклад: перевірка новин щогодини")
 
     while True:
         try:
