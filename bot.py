@@ -9,7 +9,6 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import requests
-import schedule
 from dotenv import load_dotenv
 
 
@@ -41,7 +40,7 @@ LEAGUE_IDS = [
 
 PRIORITY_LEAGUES = [2, 5, 8, 82, 564]
 
-# 0 = без лимита, отправлять все новые новости
+# 0 = без лимита, публиковать все новые новости за проход
 MAX_POSTS_PER_RUN = 0
 
 TELEGRAM_PAUSE_SECONDS = 5
@@ -54,10 +53,8 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PUBLISHED_FILE = os.path.join(BASE_DIR, "published_ids.json")
 TELEGRAPH_TOKEN_FILE = os.path.join(BASE_DIR, "telegraph_token.txt")
 
-# Google/Wikimedia отключены специально:
-# они часто подбирают старые/нерелевантные фото.
-# Используем только логотипы команд/лиги из SportMonks
-# или нейтральный fallback.
+# Поиск картинок через Google/Wikimedia убран специально.
+# Используем только логотипы из SportMonks или fallback.
 FALLBACK_IMAGES = [
     "https://upload.wikimedia.org/wikipedia/commons/thumb/1/1d/Football_Pallo_valmiina-cropped.jpg/640px-Football_Pallo_valmiina-cropped.jpg",
     "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5c/Football_iu_002.jpg/640px-Football_iu_002.jpg",
@@ -77,7 +74,7 @@ def now_utc():
 def parse_sportmonks_dt(value):
     """
     Возвращает timezone-aware datetime в UTC.
-    Поддерживает:
+    Поддерживает форматы:
     - 2026-03-10 20:00:00
     - 2026-03-10 20:00
     - 2026-03-10T20:00:00Z
@@ -845,23 +842,44 @@ def run_all():
     print(f"Готово. Нових новин опубліковано: {total_sent}.")
 
 
+# ========== ЦИКЛ КАЖДЫЙ ЧАС ==========
+
+def sleep_until_next_hour():
+    now = now_utc()
+    next_run = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+
+    print(
+        "⏰ Наступна перевірка: "
+        f"{next_run.strftime('%Y-%m-%d %H:%M:%S')} UTC | "
+        f"{next_run.astimezone(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S')} за Києвом"
+    )
+
+    while True:
+        remaining = (next_run - now_utc()).total_seconds()
+        if remaining <= 0:
+            break
+        time.sleep(min(30, remaining))
+
+
 # ========== ЗАПУСК ==========
 
 if __name__ == "__main__":
     print("Бот запущено!")
-    run_all()
-
-    # Проверка каждый час
-    schedule.every().hour.at(":00").do(run_all)
-    print("📅 Розклад: перевірка новин щогодини")
 
     while True:
         try:
-            schedule.run_pending()
-            time.sleep(30)
+            run_all()
         except KeyboardInterrupt:
             print("\nЗупинка бота.")
             break
         except Exception as e:
-            print(f"⚠️ Помилка в головному циклі: {e}")
+            print(f"⚠️ Помилка під час run_all(): {e}")
+
+        try:
+            sleep_until_next_hour()
+        except KeyboardInterrupt:
+            print("\nЗупинка бота.")
+            break
+        except Exception as e:
+            print(f"⚠️ Помилка в циклі очікування: {e}")
             time.sleep(30)
