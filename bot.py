@@ -4,7 +4,8 @@ import time
 import re
 import requests
 import schedule
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 # ========== НАЛАШТУВАННЯ ==========
@@ -14,6 +15,8 @@ SPORTMONKS_TOKEN = os.getenv("SPORTMONKS_TOKEN")
 DEEPL_TOKEN      = os.getenv("DEEPL_TOKEN")
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHANNEL = os.getenv("TELEGRAM_CHANNEL")
+
+KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
 LEAGUE_IDS = [
     2, 5,
@@ -143,6 +146,19 @@ def format_form(text):
     return re.sub(r'\[([WDLU]+)\]', replace_form, text or "")
 
 
+def to_kyiv_str(starting_at):
+    """Конвертує UTC рядок у час за Києвом."""
+    if not starting_at:
+        return ""
+    try:
+        utc_dt = datetime.strptime(starting_at[:16], "%Y-%m-%d %H:%M")
+        utc_dt = utc_dt.replace(tzinfo=timezone.utc)
+        kyiv_dt = utc_dt.astimezone(KYIV_TZ)
+        return kyiv_dt.strftime("%d.%m %H:%M")
+    except Exception:
+        return starting_at[:16]
+
+
 # ========== ФОТО ==========
 
 def get_image(fixture):
@@ -150,8 +166,6 @@ def get_image(fixture):
     global _fallback_index
 
     participants = fixture.get("participants", [])
-
-    # Сортуємо: home першим
     sorted_p = sorted(
         participants,
         key=lambda p: 0 if str((p.get("meta") or {}).get("location", "")).lower() == "home" else 1
@@ -163,14 +177,12 @@ def get_image(fixture):
             print(f"✅ Логотип команди: {img}")
             return img
 
-    # Логотип ліги
     league = fixture.get("league") or {}
     img = league.get("image_path") or league.get("logo_path")
     if img and img.startswith("http"):
         print(f"✅ Логотип ліги: {img}")
         return img
 
-    # Fallback
     img = FALLBACK_IMAGES[_fallback_index % len(FALLBACK_IMAGES)]
     _fallback_index += 1
     print(f"⚠️ Fallback: {img}")
@@ -304,7 +316,6 @@ def send_telegram(text, image_url=None, telegraph_url=None):
     if telegraph_url:
         reply_markup = {"inline_keyboard": [[{"text": "📖 Читати повністю", "url": telegraph_url}]]}
 
-    # Відправка з фото
     if image_url and len(text) <= 1024:
         payload = {
             "chat_id": TELEGRAM_CHANNEL,
@@ -322,7 +333,6 @@ def send_telegram(text, image_url=None, telegraph_url=None):
             print("📤 Відправлено фото+підпис")
             return True
 
-        # Спробуємо скачати і відправити файлом
         try:
             img_data = requests.get(image_url, timeout=10).content
             files = {"photo": ("photo.jpg", img_data, "image/jpeg")}
@@ -339,7 +349,6 @@ def send_telegram(text, image_url=None, telegraph_url=None):
         except Exception as e:
             print(f"⚠️ Скачування фото: {e}")
 
-    # Відправка як текст (з прев'ю фото через invisible link)
     if image_url:
         text = f'<a href="{image_url}">&#8205;</a>' + text
     payload = {
@@ -375,12 +384,9 @@ def process_fixture(fixture):
         except Exception:
             pass
 
-    # Визначаємо які новини показувати
     prematch, postmatch = [], []
-
     if match_dt is None or match_dt > now + timedelta(hours=2):
         prematch = [("pre", n) for n in fixture.get("prematchnews", [])]
-
     if match_dt and match_dt < now - timedelta(hours=2):
         postmatch = [("post", n) for n in fixture.get("postmatchnews", [])]
 
@@ -405,13 +411,6 @@ def process_fixture(fixture):
             for line in lines if line.get("text", "").strip()
         ]
 
-        date_str = ""
-        if starting_at:
-            try:
-                date_str = datetime.strptime(starting_at[:16], "%Y-%m-%d %H:%M").strftime("%d.%m %H:%M")
-            except Exception:
-                pass
-
         full_text = "\n\n".join(lines_ua)
         preview = ""
         if full_text:
@@ -419,9 +418,10 @@ def process_fixture(fixture):
             preview = (clean[:300].rsplit(" ", 1)[0] + "…") if len(clean) > 300 else clean
 
         type_label = "📊 Підсумок матчу" if news_type == "post" else "🔮 Прев'ю матчу"
+        date_str = to_kyiv_str(starting_at)
 
         post = f"📌 <b>{fixture_name}</b>\n"
-        post += f"⚽ {league_name} • 🗓 {date_str} UTC\n"
+        post += f"⚽ {league_name} • 🗓 {date_str} за Києвом\n"
         post += f"{type_label}\n"
         if title_ua:
             post += f"\n<b>{title_ua}</b>\n"
@@ -438,7 +438,7 @@ def process_fixture(fixture):
                 image_url=image_url
             )
 
-        # Зберігаємо ID до відправки — захист від дублікатів при редеплої
+        # Зберігаємо до відправки — захист від дублікатів
         published_ids[str(news_id)] = datetime.now().strftime("%Y-%m-%d")
         save_published_ids(published_ids)
 
@@ -457,7 +457,6 @@ def run_all():
     print(f"\n{'='*40}")
     print(f"Запуск: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
 
-    # Оновлюємо published_ids з Gist на початку кожного запуску
     global published_ids
     fresh = _load_from_gist()
     if fresh:
@@ -470,7 +469,6 @@ def run_all():
     today = now.strftime("%Y-%m-%d")
     yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
 
-    # Фільтруємо матчі
     relevant = []
     for f in fixtures:
         start = f.get("starting_at", "")
@@ -491,32 +489,40 @@ def run_all():
         elif has_post and now - timedelta(hours=24) < match_time < now - timedelta(hours=2):
             relevant.append(f)
 
-    # Сортуємо за пріоритетом ліги
     relevant.sort(key=lambda f: (
         PRIORITY_LEAGUES.index(f.get("league_id")) if f.get("league_id") in PRIORITY_LEAGUES
         else len(PRIORITY_LEAGUES)
     ))
 
     print(f"Матчів з новинами: {len(relevant)}")
-
     total = sum(process_fixture(f) for f in relevant)
     print(f"Готово. Опубліковано: {total}.")
 
 
 # ========== ЗАПУСК ==========
 
+def sleep_until_next_hour():
+    """Чекає до початку наступної години."""
+    now = datetime.now()
+    next_run = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    seconds = (next_run - now).total_seconds()
+    print(f"⏰ Наступна перевірка: {next_run.strftime('%Y-%m-%d %H:%M')} UTC")
+    while seconds > 0:
+        time.sleep(min(30, seconds))
+        seconds = (next_run - datetime.now()).total_seconds()
+
+
 if __name__ == "__main__":
     print("Бот запущено!")
-    run_all()
-
-    for hour in range(6, 22):
-        schedule.every().day.at(f"{hour:02d}:00").do(run_all)
-    print("📅 Розклад: щогодини 06:00–21:00 UTC")
 
     while True:
         try:
-            schedule.run_pending()
-            time.sleep(30)
+            run_all()
+        except Exception as e:
+            print(f"⚠️ Помилка: {e}")
+
+        try:
+            sleep_until_next_hour()
         except KeyboardInterrupt:
             print("\nЗупинка.")
             break
