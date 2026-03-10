@@ -517,7 +517,7 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
-    print("Бот запущено!", flush=True)
+    print("Бот запущено! Перевірка щогодини 24/7", flush=True)
 
     while True:
         try:
