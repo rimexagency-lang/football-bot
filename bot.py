@@ -331,50 +331,22 @@ def get_fallback_image():
 
 
 def get_image(fixture_name, fixture=None):
-    """Отримує релевантне фото — Google → Wikimedia → Pexels → Openverse → Fallback."""
-    parts = re.split(r' vs\.? ', fixture_name, flags=re.IGNORECASE)
-    team1 = parts[0].strip() if parts else fixture_name
-    team2 = parts[1].strip() if len(parts) > 1 else ""
-
-    search1 = TEAM_SEARCH_NAMES.get(team1, f"{team1} football")
-    search2 = TEAM_SEARCH_NAMES.get(team2, f"{team2} football") if team2 else ""
-
+    # Просто шукаємо по назві матчу
     year = datetime.now().year
-
-    # 1. Google — найрелевантніші свіжі фото
+    
     for q in [
-    f"{team1} football player {year}",
-    f"{team2} football player {year}",
-    f"{team1} vs {team2} match action {year}"
-]:
-        if not q.strip():
-            continue
+        f"{fixture_name} {year}",           # "Galatasaray vs Liverpool 2026"
+        f"{fixture_name} Champions League", # "Galatasaray vs Liverpool Champions League"
+        fixture_name,                        # "Galatasaray vs Liverpool"
+    ]:
         print(f"  🔍 Google: '{q}'")
         img = get_image_google(q)
         if img:
             return img
 
-    # 2. Wikimedia
-    for q in [search1, search2]:
-        if not q:
-            continue
-        img = get_image_wikimedia(q)
-        if img:
-            return img
-
-    # 3. Pexels
-    for q in [search1, search2]:
-        if not q:
-            continue
-        img = get_image_pexels(q)
-        if img:
-            return img
-
-    # 4. Openverse
-    for q in [search1, search2]:
-        if not q:
-            continue
-        img = get_image_openverse(q)
+    # Fallback — логотип команди
+    if fixture:
+        img = get_team_image_from_fixture(fixture)
         if img:
             return img
 
@@ -760,4 +732,5 @@ if __name__ == "__main__":
         except KeyboardInterrupt:
             print("\nЗупинка бота.")
             break
+
 
