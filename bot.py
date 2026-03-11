@@ -571,7 +571,6 @@ def process_news(news_item):
 RSS_FEEDS = [
     ("https://www.goal.com/feeds/en/news", "Goal.com"),
     ("https://feeds.bbci.co.uk/sport/football/rss.xml", "BBC Sport"),
-    ("https://www.uefa.com/rssfeed/newsrss.xml", "UEFA"),
 ]
 
 def parse_rss(url, source_name):
@@ -621,13 +620,33 @@ def is_rss_recent(pub_date_str, hours=6):
         return True
 
 
+def fetch_article_text(url):
+    """Спробувати отримати повний текст статті."""
+    if not url:
+        return ""
+    try:
+        r = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code != 200:
+            return ""
+        # Витягуємо параграфи з HTML
+        text = r.text
+        paragraphs = re.findall(r'<p[^>]*>(.*?)</p>', text, re.DOTALL)
+        clean = []
+        for p in paragraphs:
+            p = re.sub(r'<[^>]+>', '', p).strip()
+            if len(p) > 50:  # ігноруємо короткі службові параграфи
+                clean.append(p)
+        return "\n\n".join(clean[:20])  # максимум 20 параграфів
+    except Exception:
+        return ""
+
+
 def run_rss():
-    """Перевіряє RSS і публікує нові статті."""
+    """Перевіряє RSS і публікує нові статті через Telegraph."""
     total = 0
     for feed_url, source in RSS_FEEDS:
         items = parse_rss(feed_url, source)
         for item in items:
-            # Унікальний ID для RSS — хеш посилання
             rss_id = "rss_" + str(abs(hash(item["link"] or item["title"])))
             if rss_id in published_ids:
                 continue
@@ -635,16 +654,27 @@ def run_rss():
                 continue
 
             title_ua = translate(item["title"])
-            desc_ua  = translate(item["description"]) if item["description"] else ""
 
+            # Намагаємось отримати повний текст статті
+            full_raw = fetch_article_text(item["link"]) or item["description"]
+            full_ua = translate(full_raw) if full_raw else ""
+
+            # Публікуємо в Telegraph
+            telegraph_url = None
+            if full_ua:
+                telegraph_url = publish_to_telegraph(
+                    title=title_ua or item["title"],
+                    text=full_ua,
+                )
+
+            # Короткий пост для Telegram
+            preview = full_ua[:400].rsplit(" ", 1)[0] + "…" if len(full_ua) > 400 else full_ua
             post = f"📰 <b>{title_ua}</b>\n"
             post += f"🌐 {source}\n"
-            if desc_ua:
-                post += f"\n{desc_ua[:400]}"
-            if item["link"]:
-                post += f'\n\n<a href="{item["link"]}">🔗 Читати повністю</a>'
+            if preview:
+                post += f"\n{preview}"
 
-            if send_telegram(post):
+            if send_telegram(post, telegraph_url=telegraph_url):
                 published_ids[rss_id] = datetime.now().strftime("%Y-%m-%d")
                 total += 1
                 time.sleep(3)
