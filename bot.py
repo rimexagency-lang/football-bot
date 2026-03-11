@@ -129,8 +129,7 @@ def cleanup_old_ids(published_dict, days=7):
     return cleaned
 
 
-published_ids = cleanup_old_ids(load_published_ids())
-print(f"📦 Активних published_ids: {len(published_ids)}", flush=True)
+published_ids = {}
 
 
 # ========== ДОПОМІЖНІ ФУНКЦІЇ ==========
@@ -220,6 +219,19 @@ def get_fixtures():
 
         filtered = [f for f in all_fixtures if f.get("league_id") in LEAGUE_IDS]
         print(f"[{datetime.now().strftime('%H:%M')}] Матчів: {len(filtered)} / {len(all_fixtures)}", flush=True)
+
+        # ДІАГНОСТИКА
+        news_count = 0
+        for f in filtered:
+            pre = f.get("prematchnews", [])
+            post = f.get("postmatchnews", [])
+            if pre or post:
+                news_count += 1
+                print(f"  📰 {f.get('name')} | pre:{len(pre)} post:{len(post)} | start:{f.get('starting_at','')[:16]}", flush=True)
+                for n in pre + post:
+                    print(f"     ID:{n.get('id')} | {n.get('title','(без назви)')[:60]}", flush=True)
+        print(f"  Всього матчів з новинами: {news_count}", flush=True)
+
         return filtered
     except Exception as e:
         print(f"❌ Помилка отримання матчів: {e}", flush=True)
@@ -452,10 +464,14 @@ def process_fixture(fixture):
 # ========== ГОЛОВНА ФУНКЦІЯ ==========
 
 def run_all():
+    global published_ids
     print(f"\n{'='*40}", flush=True)
     print(f"Запуск: {datetime.now().strftime('%Y-%m-%d %H:%M')}", flush=True)
 
-    global published_ids
+    if not published_ids:
+        published_ids = cleanup_old_ids(load_published_ids())
+        print(f"📦 Активних published_ids: {len(published_ids)}", flush=True)
+
     fresh = _load_from_gist()
     if fresh:
         published_ids.update(fresh)
@@ -491,7 +507,13 @@ def run_all():
         else len(PRIORITY_LEAGUES)
     ))
 
-    print(f"Матчів з новинами: {len(relevant)}", flush=True)
+    print(f"Матчів з новинами (relevant): {len(relevant)}", flush=True)
+    for f in relevant:
+        for news_type, news in [("pre", n) for n in f.get("prematchnews", [])] + [("post", n) for n in f.get("postmatchnews", [])]:
+            news_id = str(news.get("id"))
+            status = "вже опубліковано" if news_id in published_ids else "НОВА ✅"
+            print(f"  [{news_type}] {f.get('name')} | ID:{news_id} | {status}", flush=True)
+
     total = sum(process_fixture(f) for f in relevant)
     print(f"Готово. Опубліковано: {total}.", flush=True)
 
