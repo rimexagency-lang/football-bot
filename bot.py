@@ -188,7 +188,7 @@ def get_image(fixture):
 # ========== SPORTMONKS NEWS API ==========
 
 def get_all_news():
-    """Отримує новини через правильні Sportmonks endpoints."""
+    """Отримує новини через Sportmonks news endpoints."""
     all_news = []
     league_filter = ",".join(str(i) for i in LEAGUE_IDS)
 
@@ -418,6 +418,16 @@ def process_news(news_item):
                 image_url = get_image(f)
         except Exception as e:
             print(f"⚠️ Fixture {fixture_id}: {e}", flush=True)
+
+    # Фільтр по даті — тільки вчора, сьогодні і завтра
+    if starting_at:
+        try:
+            match_dt = datetime.strptime(starting_at[:10], "%Y-%m-%d")
+            now = datetime.now()
+            if match_dt < now - timedelta(days=1) or match_dt > now + timedelta(days=2):
+                return 0
+        except Exception:
+            pass
 
     lines = news_item.get("lines", [])
 
