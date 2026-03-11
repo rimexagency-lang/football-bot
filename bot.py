@@ -188,34 +188,56 @@ def get_image(fixture):
 # ========== SPORTMONKS NEWS API ==========
 
 def get_all_news():
-    """Отримує новини напряму через news endpoints."""
+    """Отримує новини через правильні Sportmonks endpoints."""
     all_news = []
+    league_filter = ",".join(str(i) for i in LEAGUE_IDS)
 
-    for endpoint in ["prematch/upcoming", "prematch", "postmatch"]:
+    endpoints = [
+        ("pre-match/upcoming", "прематч майбутні"),
+        ("pre-match", "прематч всі"),
+        ("post-match", "постматч всі"),
+    ]
+
+    for endpoint, label in endpoints:
         url = f"https://api.sportmonks.com/v3/football/news/{endpoint}"
-        params = {"api_token": SPORTMONKS_TOKEN, "per_page": 50}
+        params = {
+            "api_token": SPORTMONKS_TOKEN,
+            "include": "lines",
+            "filters": f"newsitemLeagues:{league_filter}",
+            "per_page": 50
+        }
         try:
             page = 1
+            total_this = 0
             while True:
                 params["page"] = page
                 r = requests.get(url, params=params, timeout=20)
                 if r.status_code != 200:
-                    print(f"❌ {endpoint}: {r.status_code} {r.text[:100]}", flush=True)
+                    print(f"❌ {label}: {r.status_code} {r.text[:150]}", flush=True)
                     break
                 resp = r.json()
                 data = resp.get("data", [])
                 all_news.extend(data)
-                print(f"  📡 {endpoint} стор.{page}: {len(data)} новин", flush=True)
+                total_this += len(data)
                 if not resp.get("pagination", {}).get("has_more", False):
                     break
                 page += 1
                 if page > 10:
                     break
+            print(f"  📡 {label}: {total_this} новин", flush=True)
         except Exception as e:
-            print(f"❌ {endpoint}: {e}", flush=True)
+            print(f"❌ {label}: {e}", flush=True)
 
-    print(f"📰 Всього новин з API: {len(all_news)}", flush=True)
-    return all_news
+    # Видаляємо дублікати по ID
+    seen = set()
+    unique = []
+    for n in all_news:
+        if n.get("id") not in seen:
+            seen.add(n.get("id"))
+            unique.append(n)
+
+    print(f"📰 Всього унікальних новин: {len(unique)}", flush=True)
+    return unique
 
 
 # ========== ПЕРЕКЛАД ==========
@@ -363,7 +385,6 @@ def send_telegram(text, image_url=None, telegraph_url=None):
 # ========== ОБРОБКА НОВИНИ ==========
 
 def process_news(news_item):
-    """Обробляє одну новину напряму."""
     news_id = news_item.get("id")
     if not news_id or str(news_id) in published_ids:
         return 0
@@ -377,7 +398,6 @@ def process_news(news_item):
     news_type_raw = news_item.get("type", "prematch")
     news_type = "post" if "post" in str(news_type_raw).lower() else "pre"
 
-    # Отримуємо деталі fixture
     fixture_name = f"Матч ID:{fixture_id}"
     league_name = ""
     starting_at = ""
@@ -399,19 +419,7 @@ def process_news(news_item):
         except Exception as e:
             print(f"⚠️ Fixture {fixture_id}: {e}", flush=True)
 
-    # Отримуємо текст новини
     lines = news_item.get("lines", [])
-    if not lines and fixture_id:
-        try:
-            r = requests.get(
-                f"https://api.sportmonks.com/v3/football/news/{news_id}",
-                params={"api_token": SPORTMONKS_TOKEN, "include": "lines"},
-                timeout=10
-            )
-            if r.status_code == 200:
-                lines = r.json().get("data", {}).get("lines", [])
-        except Exception:
-            pass
 
     if not title and not lines:
         return 0
@@ -476,7 +484,6 @@ def run_all():
 
     all_news = get_all_news()
 
-    # Сортуємо — пріоритетні ліги першими
     all_news.sort(key=lambda n: (
         PRIORITY_LEAGUES.index(n.get("league_id")) if n.get("league_id") in PRIORITY_LEAGUES
         else len(PRIORITY_LEAGUES)
