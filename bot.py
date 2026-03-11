@@ -353,9 +353,31 @@ def get_all_news():
 
 # ========== ПЕРЕКЛАД ==========
 
-def translate(text):
-    if not text or not DEEPL_TOKEN:
+def translate_google(text):
+    """Google Translate неофіційний API — безкоштовно без лімітів."""
+    if not text:
         return text or ""
+    try:
+        import urllib.parse
+        encoded = urllib.parse.quote(text)
+        url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=uk&dt=t&q={encoded}"
+        r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code == 200:
+            data = r.json()
+            result = ""
+            for block in data[0]:
+                if block[0]:
+                    result += block[0]
+            return result.strip() if result.strip() else text
+    except Exception as e:
+        print(f"⚠️ Google Translate: {e}", flush=True)
+    return text
+
+
+def translate_deepl(text):
+    """DeepL — використовуємо як fallback."""
+    if not text or not DEEPL_TOKEN:
+        return None
     try:
         r = requests.post(
             "https://api-free.deepl.com/v2/translate",
@@ -363,13 +385,38 @@ def translate(text):
             json={"text": [text], "target_lang": "UK"},
             timeout=15
         )
-        return r.json()["translations"][0]["text"]
+        if r.status_code == 200:
+            return r.json()["translations"][0]["text"]
+        if r.status_code == 456:  # ліміт вичерпано
+            print("⚠️ DeepL ліміт вичерпано, переходимо на Google", flush=True)
     except requests.exceptions.Timeout:
         print("⏱ DeepL timeout", flush=True)
-        return text
     except Exception as e:
-        print(f"⚠️ Переклад: {e}", flush=True)
-        return text
+        print(f"⚠️ DeepL: {e}", flush=True)
+    return None
+
+
+_deepl_exhausted = False
+
+def translate(text):
+    """Перекладає текст: спочатку Google Translate, DeepL як fallback."""
+    global _deepl_exhausted
+    if not text:
+        return text or ""
+
+    # Основний перекладач — Google Translate (без лімітів)
+    result = translate_google(text)
+    if result and result != text:
+        return result
+
+    # Fallback — DeepL
+    if not _deepl_exhausted:
+        deepl_result = translate_deepl(text)
+        if deepl_result:
+            return deepl_result
+        _deepl_exhausted = True
+
+    return text
 
 
 # ========== TELEGRAPH ==========
@@ -709,7 +756,6 @@ def run_rss():
             full_raw = fetch_article_text(item["link"]) or item["description"]
             full_ua = ""
             if full_raw:
-                # Перекладаємо по абзацах щоб не перевищити ліміт DeepL
                 paragraphs = full_raw.split("\n\n")
                 translated = []
                 for para in paragraphs:
