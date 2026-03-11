@@ -41,6 +41,7 @@ FALLBACK_IMAGES = [
     "https://upload.wikimedia.org/wikipedia/commons/thumb/e/e3/FCB-DFB-Pokal-Finale2014.jpg/320px-FCB-DFB-Pokal-Finale2014.jpg",
 ]
 _fallback_index = 0
+published_ids = {}
 
 
 # ========== PUBLISHED IDS ==========
@@ -129,9 +130,6 @@ def cleanup_old_ids(published_dict, days=7):
     return cleaned
 
 
-published_ids = {}
-
-
 # ========== ДОПОМІЖНІ ФУНКЦІЇ ==========
 
 def format_form(text):
@@ -187,55 +185,37 @@ def get_image(fixture):
     return img
 
 
-# ========== SPORTMONKS ==========
+# ========== SPORTMONKS NEWS API ==========
 
-def get_fixtures():
-    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-    in_3_days = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d")
+def get_all_news():
+    """Отримує новини напряму через news endpoints."""
+    all_news = []
 
-    url = f"https://api.sportmonks.com/v3/football/fixtures/between/{yesterday}/{in_3_days}"
-    params = {
-        "api_token": SPORTMONKS_TOKEN,
-        "include": "prematchNews.lines;postmatchNews.lines;participants;league",
-        "per_page": 100
-    }
+    for endpoint in ["prematch/upcoming", "prematch", "postmatch"]:
+        url = f"https://api.sportmonks.com/v3/football/news/{endpoint}"
+        params = {"api_token": SPORTMONKS_TOKEN, "per_page": 50}
+        try:
+            page = 1
+            while True:
+                params["page"] = page
+                r = requests.get(url, params=params, timeout=20)
+                if r.status_code != 200:
+                    print(f"❌ {endpoint}: {r.status_code} {r.text[:100]}", flush=True)
+                    break
+                resp = r.json()
+                data = resp.get("data", [])
+                all_news.extend(data)
+                print(f"  📡 {endpoint} стор.{page}: {len(data)} новин", flush=True)
+                if not resp.get("pagination", {}).get("has_more", False):
+                    break
+                page += 1
+                if page > 10:
+                    break
+        except Exception as e:
+            print(f"❌ {endpoint}: {e}", flush=True)
 
-    try:
-        all_fixtures = []
-        page = 1
-        while True:
-            params["page"] = page
-            r = requests.get(url, params=params, timeout=20)
-            if r.status_code != 200:
-                print(f"❌ API помилка: {r.status_code}", flush=True)
-                break
-            resp = r.json()
-            all_fixtures.extend(resp.get("data", []))
-            if not resp.get("pagination", {}).get("has_more", False):
-                break
-            page += 1
-            if page > 20:
-                break
-
-        filtered = [f for f in all_fixtures if f.get("league_id") in LEAGUE_IDS]
-        print(f"[{datetime.now().strftime('%H:%M')}] Матчів: {len(filtered)} / {len(all_fixtures)}", flush=True)
-
-        # ДІАГНОСТИКА
-        news_count = 0
-        for f in filtered:
-            pre = f.get("prematchnews", [])
-            post = f.get("postmatchnews", [])
-            if pre or post:
-                news_count += 1
-                print(f"  📰 {f.get('name')} | pre:{len(pre)} post:{len(post)} | start:{f.get('starting_at','')[:16]}", flush=True)
-                for n in pre + post:
-                    print(f"     ID:{n.get('id')} | {n.get('title','(без назви)')[:60]}", flush=True)
-        print(f"  Всього матчів з новинами: {news_count}", flush=True)
-
-        return filtered
-    except Exception as e:
-        print(f"❌ Помилка отримання матчів: {e}", flush=True)
-        return []
+    print(f"📰 Всього новин з API: {len(all_news)}", flush=True)
+    return all_news
 
 
 # ========== ПЕРЕКЛАД ==========
@@ -380,85 +360,102 @@ def send_telegram(text, image_url=None, telegraph_url=None):
     return False
 
 
-# ========== ОБРОБКА МАТЧІВ ==========
+# ========== ОБРОБКА НОВИНИ ==========
 
-def process_fixture(fixture):
-    fixture_name = fixture.get("name", "Невідомий матч")
-    league_name = (fixture.get("league") or {}).get("name", "")
-    starting_at = fixture.get("starting_at", "")
+def process_news(news_item):
+    """Обробляє одну новину напряму."""
+    news_id = news_item.get("id")
+    if not news_id or str(news_id) in published_ids:
+        return 0
 
-    now = datetime.now()
-    match_dt = None
-    if starting_at:
+    league_id = news_item.get("league_id")
+    if league_id not in LEAGUE_IDS:
+        return 0
+
+    fixture_id = news_item.get("fixture_id")
+    title = (news_item.get("title") or "").strip()
+    news_type_raw = news_item.get("type", "prematch")
+    news_type = "post" if "post" in str(news_type_raw).lower() else "pre"
+
+    # Отримуємо деталі fixture
+    fixture_name = f"Матч ID:{fixture_id}"
+    league_name = ""
+    starting_at = ""
+    image_url = None
+
+    if fixture_id:
         try:
-            match_dt = datetime.strptime(starting_at[:16], "%Y-%m-%d %H:%M")
+            r = requests.get(
+                f"https://api.sportmonks.com/v3/football/fixtures/{fixture_id}",
+                params={"api_token": SPORTMONKS_TOKEN, "include": "participants;league"},
+                timeout=10
+            )
+            if r.status_code == 200:
+                f = r.json().get("data", {})
+                fixture_name = f.get("name", fixture_name)
+                league_name = (f.get("league") or {}).get("name", "")
+                starting_at = f.get("starting_at", "")
+                image_url = get_image(f)
+        except Exception as e:
+            print(f"⚠️ Fixture {fixture_id}: {e}", flush=True)
+
+    # Отримуємо текст новини
+    lines = news_item.get("lines", [])
+    if not lines and fixture_id:
+        try:
+            r = requests.get(
+                f"https://api.sportmonks.com/v3/football/news/{news_id}",
+                params={"api_token": SPORTMONKS_TOKEN, "include": "lines"},
+                timeout=10
+            )
+            if r.status_code == 200:
+                lines = r.json().get("data", {}).get("lines", [])
         except Exception:
             pass
 
-    prematch, postmatch = [], []
-    if match_dt is None or match_dt > now + timedelta(hours=2):
-        prematch = [("pre", n) for n in fixture.get("prematchnews", [])]
-    if match_dt and match_dt < now - timedelta(hours=2):
-        postmatch = [("post", n) for n in fixture.get("postmatchnews", [])]
-
-    news_items = prematch + postmatch
-    if not news_items:
+    if not title and not lines:
         return 0
 
-    sent = 0
-    for news_type, news in news_items:
-        news_id = news.get("id")
-        if not news_id or str(news_id) in published_ids:
-            continue
+    title_ua = format_form(translate(title)) if title else ""
+    lines_ua = [
+        format_form(translate(line.get("text", "")))
+        for line in lines if line.get("text", "").strip()
+    ]
 
-        title = (news.get("title") or "").strip()
-        lines = news.get("lines", [])
-        if not title and not lines:
-            continue
+    full_text = "\n\n".join(lines_ua)
+    preview = ""
+    if full_text:
+        clean = re.sub(r'<[^>]+>', '', full_text)
+        preview = (clean[:300].rsplit(" ", 1)[0] + "…") if len(clean) > 300 else clean
 
-        title_ua = format_form(translate(title)) if title else ""
-        lines_ua = [
-            format_form(translate(line.get("text", "")))
-            for line in lines if line.get("text", "").strip()
-        ]
+    type_label = "📊 Підсумок матчу" if news_type == "post" else "🔮 Прев'ю матчу"
+    date_str = to_kyiv_str(starting_at)
 
-        full_text = "\n\n".join(lines_ua)
-        preview = ""
-        if full_text:
-            clean = re.sub(r'<[^>]+>', '', full_text)
-            preview = (clean[:300].rsplit(" ", 1)[0] + "…") if len(clean) > 300 else clean
-
-        type_label = "📊 Підсумок матчу" if news_type == "post" else "🔮 Прев'ю матчу"
-        date_str = to_kyiv_str(starting_at)
-
-        post = f"📌 <b>{fixture_name}</b>\n"
+    post = f"📌 <b>{fixture_name}</b>\n"
+    if league_name:
         post += f"⚽ {league_name} • 🗓 {date_str} за Києвом\n"
-        post += f"{type_label}\n"
-        if title_ua:
-            post += f"\n<b>{title_ua}</b>\n"
-        if preview:
-            post += f"\n{preview}"
+    post += f"{type_label}\n"
+    if title_ua:
+        post += f"\n<b>{title_ua}</b>\n"
+    if preview:
+        post += f"\n{preview}"
 
-        image_url = get_image(fixture)
+    telegraph_url = None
+    if full_text:
+        telegraph_url = publish_to_telegraph(
+            title=title_ua or fixture_name,
+            text=full_text,
+            image_url=image_url
+        )
 
-        telegraph_url = None
-        if full_text:
-            telegraph_url = publish_to_telegraph(
-                title=title_ua or fixture_name,
-                text=full_text,
-                image_url=image_url
-            )
+    published_ids[str(news_id)] = datetime.now().strftime("%Y-%m-%d")
+    save_published_ids(published_ids)
 
-        published_ids[str(news_id)] = datetime.now().strftime("%Y-%m-%d")
-        save_published_ids(published_ids)
+    send_telegram(post, image_url=image_url, telegraph_url=telegraph_url)
+    print(f"✅ [{news_type}] {title_ua or title or fixture_name}", flush=True)
 
-        send_telegram(post, image_url=image_url, telegraph_url=telegraph_url)
-        print(f"✅ [{news_type}] {title_ua or fixture_name}", flush=True)
-
-        sent += 1
-        time.sleep(3)
-
-    return sent
+    time.sleep(3)
+    return 1
 
 
 # ========== ГОЛОВНА ФУНКЦІЯ ==========
@@ -477,44 +474,15 @@ def run_all():
         published_ids.update(fresh)
         print(f"🔄 published_ids оновлено: {len(published_ids)}", flush=True)
 
-    fixtures = get_fixtures()
+    all_news = get_all_news()
 
-    now = datetime.now()
-    today = now.strftime("%Y-%m-%d")
-
-    relevant = []
-    for f in fixtures:
-        start = f.get("starting_at", "")
-        if not start:
-            continue
-        try:
-            match_time = datetime.strptime(start[:16], "%Y-%m-%d %H:%M")
-        except Exception:
-            continue
-
-        match_date = match_time.strftime("%Y-%m-%d")
-        has_pre = bool(f.get("prematchnews"))
-        has_post = bool(f.get("postmatchnews"))
-        threshold = timedelta(hours=2) if match_date == today else timedelta(hours=4)
-
-        if has_pre and match_time > now + threshold:
-            relevant.append(f)
-        elif has_post and now - timedelta(hours=24) < match_time < now - timedelta(hours=2):
-            relevant.append(f)
-
-    relevant.sort(key=lambda f: (
-        PRIORITY_LEAGUES.index(f.get("league_id")) if f.get("league_id") in PRIORITY_LEAGUES
+    # Сортуємо — пріоритетні ліги першими
+    all_news.sort(key=lambda n: (
+        PRIORITY_LEAGUES.index(n.get("league_id")) if n.get("league_id") in PRIORITY_LEAGUES
         else len(PRIORITY_LEAGUES)
     ))
 
-    print(f"Матчів з новинами (relevant): {len(relevant)}", flush=True)
-    for f in relevant:
-        for news_type, news in [("pre", n) for n in f.get("prematchnews", [])] + [("post", n) for n in f.get("postmatchnews", [])]:
-            news_id = str(news.get("id"))
-            status = "вже опубліковано" if news_id in published_ids else "НОВА ✅"
-            print(f"  [{news_type}] {f.get('name')} | ID:{news_id} | {status}", flush=True)
-
-    total = sum(process_fixture(f) for f in relevant)
+    total = sum(process_news(n) for n in all_news)
     print(f"Готово. Опубліковано: {total}.", flush=True)
 
 
