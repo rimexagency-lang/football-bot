@@ -270,65 +270,75 @@ def get_image(fixture):
     return img
 
 
-# ========== SPORTMONKS NEWS API ==========
+# ========== SPORTMONKS NEWS via FIXTURES ==========
+
+def get_fixtures_with_news(date_str):
+    """Отримати fixtures з вбудованими новинами для конкретної дати."""
+    url = "https://api.sportmonks.com/v3/football/fixtures/date/" + date_str
+    params = {
+        "api_token": SPORTMONKS_TOKEN,
+        "include": "prematchnews.lines;postmatchnews.lines;participants;league",
+        "per_page": 100,
+    }
+    fixtures = []
+    page = 1
+    while True:
+        params["page"] = page
+        try:
+            r = requests.get(url, params=params, timeout=20)
+            if r.status_code != 200:
+                break
+            resp = r.json()
+            data = resp.get("data", [])
+            fixtures.extend(data)
+            if not resp.get("pagination", {}).get("has_more", False):
+                break
+            page += 1
+            if page > 10:
+                break
+        except Exception as e:
+            print(f"⚠️ fixtures {date_str}: {e}", flush=True)
+            break
+    return fixtures
+
 
 def get_all_news():
+    """Збираємо новини з fixtures за вчора, сьогодні і завтра."""
     all_news = []
-
-    endpoints = [
-        ("pre-match/upcoming", "прематч майбутні"),
-        ("pre-match", "прематч всі"),
-        ("post-match", "постматч всі"),
+    now = datetime.now()
+    dates = [
+        (now - timedelta(days=1)).strftime("%Y-%m-%d"),
+        now.strftime("%Y-%m-%d"),
+        (now + timedelta(days=1)).strftime("%Y-%m-%d"),
+        (now + timedelta(days=2)).strftime("%Y-%m-%d"),
+        (now + timedelta(days=3)).strftime("%Y-%m-%d"),
+        (now + timedelta(days=4)).strftime("%Y-%m-%d"),
+        (now + timedelta(days=5)).strftime("%Y-%m-%d"),
+        (now + timedelta(days=6)).strftime("%Y-%m-%d"),
+        (now + timedelta(days=7)).strftime("%Y-%m-%d"),
     ]
 
-    for endpoint, label in endpoints:
-        url = f"https://api.sportmonks.com/v3/football/news/{endpoint}"
-        params = {
-            "api_token": SPORTMONKS_TOKEN,
-            "include": "lines",
-            "per_page": 100,
-            "order": "id",
-            "sort": "desc",   # Спочатку нові!
-        }
-        try:
-            page = 1
-            total_this = 0
-            stop_early = False
-            while True:
-                params["page"] = page
-                r = requests.get(url, params=params, timeout=20)
-                if r.status_code != 200:
-                    print(f"❌ {label}: {r.status_code} {r.text[:150]}", flush=True)
-                    break
-                resp = r.json()
-                data = resp.get("data", [])
-                all_news.extend(data)
-                total_this += len(data)
+    total_fixtures = 0
+    for date_str in dates:
+        fixtures = get_fixtures_with_news(date_str)
+        total_fixtures += len(fixtures)
+        for f in fixtures:
+            # Зберігаємо fixture в кеш для подальшого use
+            fid = f.get("id")
+            if fid:
+                _fixture_cache[fid] = f
 
-                # Якщо на цій сторінці вже є тільки старі новини — зупиняємось
-                old_count = 0
-                for item in data:
-                    fid = item.get("fixture_id")
-                    if fid:
-                        f = get_fixture(fid)
-                        sa = (f or {}).get("starting_at", "")
-                        ntype = "post" if "post" in endpoint else "pre"
-                        if sa and not is_date_relevant(sa, ntype):
-                            old_count += 1
-                if old_count == len(data) and len(data) > 0:
-                    stop_early = True
-                    break
+            # Прематч новини
+            for news in f.get("prematchnews", []) or []:
+                news["_fixture"] = f  # вбудовуємо fixture
+                all_news.append(news)
 
-                if not resp.get("pagination", {}).get("has_more", False):
-                    break
-                page += 1
-                if page > 20:  # максимум 20 сторінок × 100 = 2000
-                    break
+            # Постматч новини
+            for news in f.get("postmatchnews", []) or []:
+                news["_fixture"] = f
+                all_news.append(news)
 
-            suffix = " (зупинились — всі старі)" if stop_early else ""
-            print(f"  📡 {label}: {total_this} новин{suffix}", flush=True)
-        except Exception as e:
-            print(f"❌ {label}: {e}", flush=True)
+    print(f"  📡 fixtures: {total_fixtures} матчів", flush=True)
 
     seen = set()
     unique = []
@@ -500,17 +510,13 @@ def process_news(news_item):
     starting_at = ""
     image_url = None
 
-    if fixture_id:
-        f = get_fixture(fixture_id)
-        if f:
-            fixture_name = f.get("name", fixture_name)
-            league_name = (f.get("league") or {}).get("name", "")
-            starting_at = f.get("starting_at", "")
-            image_url = get_image(f)
-
-    # Фільтр по даті — pre: -1..+7, post: -3..+1
-    if starting_at and not is_date_relevant(starting_at, news_type):
-        return 0
+    # Беремо fixture з вбудованого поля або з кешу/API
+    f = news_item.get("_fixture") or (get_fixture(fixture_id) if fixture_id else {})
+    if f:
+        fixture_name = f.get("name", fixture_name)
+        league_name = (f.get("league") or {}).get("name", "")
+        starting_at = f.get("starting_at", "")
+        image_url = get_image(f)
 
     lines = news_item.get("lines", [])
 
@@ -585,39 +591,22 @@ def run_all():
         else len(PRIORITY_LEAGUES)
     ))
 
-    # Статистика фільтрації
     skipped_published = 0
-    skipped_date = 0
     skipped_empty = 0
-    debug_dates = []  # для дебагу перших 10 невідомих дат
-
     total = 0
+
     for n in all_news:
         nid = n.get("id")
         if not nid or str(nid) in published_ids:
             skipped_published += 1
             continue
 
-        # Попередня перевірка дати через fixture (з кешем)
-        fid = n.get("fixture_id")
-        ntype = "post" if "post" in str(n.get("type", "")).lower() else "pre"
-        if fid:
-            f = get_fixture(fid)
-            sa = f.get("starting_at", "") if f else ""
-            if sa and not is_date_relevant(sa, ntype):
-                skipped_date += 1
-                if len(debug_dates) < 5:
-                    debug_dates.append(f"{sa[:10]}({ntype})")
-                continue
-
         result = process_news(n)
         if result == 0:
             skipped_empty += 1
         total += result
 
-    if debug_dates:
-        print(f"📅 Приклади відфільтрованих дат: {', '.join(debug_dates)}", flush=True)
-    print(f"📊 Пропущено: вже опубліковано={skipped_published}, стара дата={skipped_date}, порожні={skipped_empty}", flush=True)
+    print(f"📊 Пропущено: вже опубліковано={skipped_published}, порожні={skipped_empty}", flush=True)
     print(f"Готово. Опубліковано: {total}.", flush=True)
 
 
