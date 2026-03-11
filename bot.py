@@ -580,19 +580,22 @@ def parse_rss(url, source_name):
         r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
         if r.status_code != 200:
             return items
-        # Простий XML парсинг без зовнішніх бібліотек
         content = r.text
         entries = re.findall(r'<item>(.*?)</item>', content, re.DOTALL)
-        for entry in entries[:10]:  # максимум 10 з кожного джерела
+        for entry in entries[:10]:
             title = re.search(r'<title><!\[CDATA\[(.*?)\]\]></title>|<title>(.*?)</title>', entry, re.DOTALL)
             link  = re.search(r'<link>(.*?)</link>|<link\s[^>]*href="([^"]+)"', entry, re.DOTALL)
             desc  = re.search(r'<description><!\[CDATA\[(.*?)\]\]></description>|<description>(.*?)</description>', entry, re.DOTALL)
             pub   = re.search(r'<pubDate>(.*?)</pubDate>', entry)
+            img   = re.search(r'<media:content[^>]+url="([^"]+)"', entry) or \
+                    re.search(r'<enclosure[^>]+url="([^"]+)"', entry) or \
+                    re.search(r'<media:thumbnail[^>]+url="([^"]+)"', entry)
 
             title_text = (title.group(1) or title.group(2) or "").strip() if title else ""
             link_url   = (link.group(1) or link.group(2) or "").strip() if link else ""
             desc_text  = re.sub(r'<[^>]+>', '', (desc.group(1) or desc.group(2) or "").strip()) if desc else ""
             pub_text   = pub.group(1).strip() if pub else ""
+            img_url    = img.group(1).strip() if img else ""
 
             if title_text:
                 items.append({
@@ -601,6 +604,7 @@ def parse_rss(url, source_name):
                     "description": desc_text[:500],
                     "pubDate": pub_text,
                     "source": source_name,
+                    "image": img_url,
                 })
     except Exception as e:
         print(f"⚠️ RSS {source_name}: {e}", flush=True)
@@ -621,22 +625,47 @@ def is_rss_recent(pub_date_str, hours=6):
 
 
 def fetch_article_text(url):
-    """Спробувати отримати повний текст статті."""
+    """Витягує текст статті — шукає <article> або основний контент."""
     if not url:
         return ""
     try:
         r = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
         if r.status_code != 200:
             return ""
-        # Витягуємо параграфи з HTML
         text = r.text
+        # Шукаємо тег <article> спочатку
+        article_match = re.search(r'<article[^>]*>(.*?)</article>', text, re.DOTALL)
+        if article_match:
+            text = article_match.group(1)
+        else:
+            main_match = re.search(r'<main[^>]*>(.*?)</main>', text, re.DOTALL)
+            if main_match:
+                text = main_match.group(1)
+        # Прибираємо скрипти, стилі, навігацію
+        text = re.sub(r'<(script|style|nav|header|footer|aside)[^>]*>.*?</\1>', '', text, flags=re.DOTALL)
         paragraphs = re.findall(r'<p[^>]*>(.*?)</p>', text, re.DOTALL)
         clean = []
         for p in paragraphs:
             p = re.sub(r'<[^>]+>', '', p).strip()
-            if len(p) > 50:  # ігноруємо короткі службові параграфи
+            if len(p) > 60 and not any(x in p.lower() for x in ['cookie', 'subscribe', 'sign up', 'newsletter', 'javascript']):
                 clean.append(p)
-        return "\n\n".join(clean[:20])  # максимум 20 параграфів
+        return "\n\n".join(clean[:15])
+    except Exception:
+        return ""
+
+
+def fetch_og_image(url):
+    """Витягує og:image з сторінки статті."""
+    if not url:
+        return ""
+    try:
+        r = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code != 200:
+            return ""
+        match = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', r.text)
+        if not match:
+            match = re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']', r.text)
+        return match.group(1).strip() if match else ""
     except Exception:
         return ""
 
@@ -655,16 +684,19 @@ def run_rss():
 
             title_ua = translate(item["title"])
 
-            # Намагаємось отримати повний текст статті
+            # Фото: з RSS → og:image → нічого
+            image_url = item.get("image") or fetch_og_image(item["link"])
+
+            # Повний текст для Telegraph
             full_raw = fetch_article_text(item["link"]) or item["description"]
             full_ua = translate(full_raw) if full_raw else ""
 
-            # Публікуємо в Telegraph
             telegraph_url = None
             if full_ua:
                 telegraph_url = publish_to_telegraph(
                     title=title_ua or item["title"],
                     text=full_ua,
+                    image_url=image_url,
                 )
 
             # Короткий пост для Telegram
@@ -674,7 +706,7 @@ def run_rss():
             if preview:
                 post += f"\n{preview}"
 
-            if send_telegram(post, telegraph_url=telegraph_url):
+            if send_telegram(post, image_url=image_url, telegraph_url=telegraph_url):
                 published_ids[rss_id] = datetime.now().strftime("%Y-%m-%d")
                 total += 1
                 time.sleep(3)
