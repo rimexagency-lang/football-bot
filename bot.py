@@ -286,11 +286,14 @@ def get_all_news():
         params = {
             "api_token": SPORTMONKS_TOKEN,
             "include": "lines",
-            "per_page": 50
+            "per_page": 100,
+            "order": "id",
+            "sort": "desc",   # Спочатку нові!
         }
         try:
             page = 1
             total_this = 0
+            stop_early = False
             while True:
                 params["page"] = page
                 r = requests.get(url, params=params, timeout=20)
@@ -301,12 +304,29 @@ def get_all_news():
                 data = resp.get("data", [])
                 all_news.extend(data)
                 total_this += len(data)
+
+                # Якщо на цій сторінці вже є тільки старі новини — зупиняємось
+                old_count = 0
+                for item in data:
+                    fid = item.get("fixture_id")
+                    if fid:
+                        f = get_fixture(fid)
+                        sa = (f or {}).get("starting_at", "")
+                        ntype = "post" if "post" in endpoint else "pre"
+                        if sa and not is_date_relevant(sa, ntype):
+                            old_count += 1
+                if old_count == len(data) and len(data) > 0:
+                    stop_early = True
+                    break
+
                 if not resp.get("pagination", {}).get("has_more", False):
                     break
                 page += 1
-                if page > 10:
+                if page > 20:  # максимум 20 сторінок × 100 = 2000
                     break
-            print(f"  📡 {label}: {total_this} новин", flush=True)
+
+            suffix = " (зупинились — всі старі)" if stop_early else ""
+            print(f"  📡 {label}: {total_this} новин{suffix}", flush=True)
         except Exception as e:
             print(f"❌ {label}: {e}", flush=True)
 
