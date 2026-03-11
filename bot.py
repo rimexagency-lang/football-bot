@@ -351,6 +351,82 @@ def get_all_news():
     return unique
 
 
+# ========== СЛОВНИК КЛУБІВ ==========
+
+# Назви які не треба перекладати або мають українські відповідники
+CLUB_NAMES = {
+    # АПЛ
+    "Spurs": "Тоттенгем", "Tottenham Hotspur": "Тоттенгем", "Tottenham": "Тоттенгем",
+    "Arsenal": "Арсенал", "Chelsea": "Челсі", "Liverpool": "Ліверпуль",
+    "Manchester City": "Манчестер Сіті", "Man City": "Манчестер Сіті",
+    "Manchester United": "Манчестер Юнайтед", "Man United": "Манчестер Юнайтед", "Man Utd": "Манчестер Юнайтед",
+    "Newcastle": "Ньюкасл", "Newcastle United": "Ньюкасл",
+    "Aston Villa": "Астон Вілла", "West Ham": "Вест Хем", "West Ham United": "Вест Хем",
+    "Everton": "Евертон", "Brighton": "Брайтон", "Brentford": "Брентфорд",
+    "Fulham": "Фулхем", "Wolves": "Вулвергемптон", "Wolverhampton": "Вулвергемптон",
+    "Crystal Palace": "Крістал Пелас", "Nottingham Forest": "Ноттінгем Форест",
+    "Leicester": "Лестер", "Leeds": "Лідс", "Leeds United": "Лідс",
+    "Sunderland": "Сандерленд", "Ipswich": "Іпсвіч",
+    # Ла Ліга
+    "Real Madrid": "Реал Мадрид", "Barcelona": "Барселона", "Atletico Madrid": "Атлетіко Мадрид",
+    "Atletico": "Атлетіко", "Sevilla": "Севілья", "Valencia": "Валенсія",
+    "Villarreal": "Вільярреал", "Athletic Club": "Атлетік Більбао", "Athletic Bilbao": "Атлетік Більбао",
+    "Real Sociedad": "Реал Сосьєдад", "Betis": "Бетіс", "Real Betis": "Бетіс",
+    "Osasuna": "Осасуна", "Girona": "Жирона", "Mallorca": "Мальорка",
+    # Серія А
+    "Juventus": "Ювентус", "AC Milan": "Мілан", "Inter Milan": "Інтер", "Inter": "Інтер",
+    "Napoli": "Наполі", "Roma": "Рома", "AS Roma": "Рома", "Lazio": "Лаціо",
+    "Fiorentina": "Фіорентіна", "Atalanta": "Аталанта", "Bologna": "Болонья",
+    "Torino": "Торіно", "Udinese": "Удінезе", "Sassuolo": "Сассуоло",
+    # Бундесліга
+    "Bayern Munich": "Баварія", "Bayern": "Баварія",
+    "Borussia Dortmund": "Боруссія Дортмунд", "Dortmund": "Боруссія Дортмунд", "BVB": "Боруссія Дортмунд",
+    "Bayer Leverkusen": "Байєр Леверкузен", "Leverkusen": "Байєр Леверкузен",
+    "RB Leipzig": "РБ Лейпциг", "Leipzig": "РБ Лейпциг",
+    "Borussia Monchengladbach": "Боруссія Менхенгладбах",
+    "Eintracht Frankfurt": "Айнтрахт Франкфурт", "Frankfurt": "Айнтрахт Франкфурт",
+    "Wolfsburg": "Вольфсбург", "Hoffenheim": "Хоффенхайм",
+    # Ліг 1
+    "PSG": "ПСЖ", "Paris Saint-Germain": "ПСЖ", "Paris Saint Germain": "ПСЖ",
+    "Marseille": "Марсель", "Lyon": "Ліон", "Monaco": "Монако",
+    "Lille": "Лілль", "Nice": "Ніцца", "Rennes": "Ренн",
+    # Ліга Чемпіонів
+    "Champions League": "Ліга чемпіонів", "UCL": "ЛЧ",
+    "Europa League": "Ліга Європи", "Conference League": "Ліга конференцій",
+    # Португалія
+    "Benfica": "Бенфіка", "Porto": "Порту", "Sporting CP": "Спортінг",
+    # Нідерланди
+    "Ajax": "Аякс", "PSV": "ПСВ", "Feyenoord": "Феєнорд",
+    # Шотландія
+    "Celtic": "Селтік", "Rangers": "Рейнджерс",
+    # Норвегія
+    "Bodo/Glimt": "Бодо/Глімт",
+    # Збірні
+    "England": "Англія", "France": "Франція", "Spain": "Іспанія",
+    "Germany": "Німеччина", "Italy": "Італія", "Portugal": "Португалія",
+    "Brazil": "Бразилія", "Argentina": "Аргентина", "Netherlands": "Нідерланди",
+    "Ukraine": "Україна",
+}
+
+def protect_names(text):
+    """Замінює назви клубів на плейсхолдери перед перекладом."""
+    placeholders = {}
+    protected = text
+    for i, (name, ua) in enumerate(CLUB_NAMES.items()):
+        placeholder = f"CLUB{i:03d}"
+        if name in protected:
+            placeholders[placeholder] = ua
+            protected = protected.replace(name, placeholder)
+    return protected, placeholders
+
+def restore_names(text, placeholders):
+    """Відновлює назви клубів після перекладу."""
+    restored = text
+    for placeholder, ua in placeholders.items():
+        restored = restored.replace(placeholder, ua)
+    return restored
+
+
 # ========== ПЕРЕКЛАД ==========
 
 def translate_google(text):
@@ -399,24 +475,28 @@ def translate_deepl(text):
 _deepl_exhausted = False
 
 def translate(text):
-    """Перекладає текст: спочатку Google Translate, DeepL як fallback."""
+    """Перекладає текст: захищає назви клубів, потім Google Translate."""
     global _deepl_exhausted
     if not text:
         return text or ""
 
+    # Захищаємо назви клубів від перекладу
+    protected, placeholders = protect_names(text)
+
     # Основний перекладач — Google Translate (без лімітів)
-    result = translate_google(text)
-    if result and result != text:
-        return result
+    result = translate_google(protected)
+    if result and result != protected:
+        return restore_names(result, placeholders)
 
     # Fallback — DeepL
     if not _deepl_exhausted:
-        deepl_result = translate_deepl(text)
+        deepl_result = translate_deepl(protected)
         if deepl_result:
-            return deepl_result
+            return restore_names(deepl_result, placeholders)
         _deepl_exhausted = True
 
-    return text
+    # Якщо переклад не спрацював — відновлюємо назви в оригіналі
+    return restore_names(text, placeholders)
 
 
 # ========== TELEGRAPH ==========
