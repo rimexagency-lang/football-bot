@@ -9,7 +9,6 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
-# ========== НАЛАШТУВАННЯ ==========
 load_dotenv()
 
 SPORTMONKS_TOKEN = os.getenv("SPORTMONKS_TOKEN")
@@ -20,16 +19,10 @@ TELEGRAM_CHANNEL = os.getenv("TELEGRAM_CHANNEL")
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
 LEAGUE_IDS = [
-    2, 5,
-    8, 9, 24, 27,
-    82,
-    301,
-    384, 387, 390,
-    564, 567, 570,
-    72, 462, 208, 453, 501, 600, 609,
+    2, 5, 8, 9, 24, 27, 82, 301, 384, 387, 390,
+    564, 567, 570, 72, 462, 208, 453, 501, 600, 609,
     181, 244, 271, 444, 486, 573, 591
 ]
-
 PRIORITY_LEAGUES = [2, 5, 8, 82, 564]
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -42,6 +35,9 @@ FALLBACK_IMAGES = [
 ]
 _fallback_index = 0
 published_ids = {}
+
+# Кеш fixture — щоб не дублювати запити до API
+_fixture_cache = {}
 
 
 # ========== PUBLISHED IDS ==========
@@ -156,6 +152,39 @@ def to_kyiv_str(starting_at):
         return starting_at[:16]
 
 
+def is_date_relevant(starting_at):
+    """Перевіряє чи дата матчу в межах: вчора — завтра."""
+    if not starting_at:
+        return True  # якщо дати немає — не фільтруємо
+    try:
+        match_dt = datetime.strptime(starting_at[:10], "%Y-%m-%d")
+        now = datetime.now()
+        return (now - timedelta(days=1)) <= match_dt <= (now + timedelta(days=2))
+    except Exception:
+        return True
+
+
+# ========== FIXTURE (з кешем) ==========
+
+def get_fixture(fixture_id):
+    """Отримує fixture з кешу або API."""
+    if fixture_id in _fixture_cache:
+        return _fixture_cache[fixture_id]
+    try:
+        r = requests.get(
+            f"https://api.sportmonks.com/v3/football/fixtures/{fixture_id}",
+            params={"api_token": SPORTMONKS_TOKEN, "include": "participants;league"},
+            timeout=10
+        )
+        if r.status_code == 200:
+            data = r.json().get("data", {})
+            _fixture_cache[fixture_id] = data
+            return data
+    except Exception as e:
+        print(f"⚠️ Fixture {fixture_id}: {e}", flush=True)
+    return {}
+
+
 # ========== ФОТО ==========
 
 def get_image(fixture):
@@ -170,25 +199,21 @@ def get_image(fixture):
     for p in sorted_p:
         img = p.get("image_path") or p.get("logo_path")
         if img and img.startswith("http"):
-            print(f"✅ Логотип команди: {img}", flush=True)
             return img
 
     league = fixture.get("league") or {}
     img = league.get("image_path") or league.get("logo_path")
     if img and img.startswith("http"):
-        print(f"✅ Логотип ліги: {img}", flush=True)
         return img
 
     img = FALLBACK_IMAGES[_fallback_index % len(FALLBACK_IMAGES)]
     _fallback_index += 1
-    print(f"⚠️ Fallback: {img}", flush=True)
     return img
 
 
 # ========== SPORTMONKS NEWS API ==========
 
 def get_all_news():
-    """Отримує новини через Sportmonks news endpoints."""
     all_news = []
     league_filter = ",".join(str(i) for i in LEAGUE_IDS)
 
@@ -228,7 +253,6 @@ def get_all_news():
         except Exception as e:
             print(f"❌ {label}: {e}", flush=True)
 
-    # Видаляємо дублікати по ID
     seen = set()
     unique = []
     for n in all_news:
@@ -404,30 +428,16 @@ def process_news(news_item):
     image_url = None
 
     if fixture_id:
-        try:
-            r = requests.get(
-                f"https://api.sportmonks.com/v3/football/fixtures/{fixture_id}",
-                params={"api_token": SPORTMONKS_TOKEN, "include": "participants;league"},
-                timeout=10
-            )
-            if r.status_code == 200:
-                f = r.json().get("data", {})
-                fixture_name = f.get("name", fixture_name)
-                league_name = (f.get("league") or {}).get("name", "")
-                starting_at = f.get("starting_at", "")
-                image_url = get_image(f)
-        except Exception as e:
-            print(f"⚠️ Fixture {fixture_id}: {e}", flush=True)
+        f = get_fixture(fixture_id)
+        if f:
+            fixture_name = f.get("name", fixture_name)
+            league_name = (f.get("league") or {}).get("name", "")
+            starting_at = f.get("starting_at", "")
+            image_url = get_image(f)
 
     # Фільтр по даті — тільки вчора, сьогодні і завтра
-    if starting_at:
-        try:
-            match_dt = datetime.strptime(starting_at[:10], "%Y-%m-%d")
-            now = datetime.now()
-            if match_dt < now - timedelta(days=1) or match_dt > now + timedelta(days=2):
-                return 0
-        except Exception:
-            pass
+    if starting_at and not is_date_relevant(starting_at):
+        return 0
 
     lines = news_item.get("lines", [])
 
@@ -479,9 +489,12 @@ def process_news(news_item):
 # ========== ГОЛОВНА ФУНКЦІЯ ==========
 
 def run_all():
-    global published_ids
+    global published_ids, _fixture_cache
     print(f"\n{'='*40}", flush=True)
     print(f"Запуск: {datetime.now().strftime('%Y-%m-%d %H:%M')}", flush=True)
+
+    # Очищаємо кеш fixture на кожен запуск
+    _fixture_cache = {}
 
     if not published_ids:
         published_ids = cleanup_old_ids(load_published_ids())
@@ -499,7 +512,37 @@ def run_all():
         else len(PRIORITY_LEAGUES)
     ))
 
-    total = sum(process_news(n) for n in all_news)
+    # Статистика фільтрації
+    skipped_published = 0
+    skipped_date = 0
+    skipped_empty = 0
+
+    total = 0
+    for n in all_news:
+        nid = n.get("id")
+        if not nid or str(nid) in published_ids:
+            skipped_published += 1
+            continue
+
+        lid = n.get("league_id")
+        if lid not in LEAGUE_IDS:
+            continue
+
+        # Попередня перевірка дати через fixture (з кешем)
+        fid = n.get("fixture_id")
+        if fid:
+            f = get_fixture(fid)
+            sa = f.get("starting_at", "") if f else ""
+            if sa and not is_date_relevant(sa):
+                skipped_date += 1
+                continue
+
+        result = process_news(n)
+        if result == 0:
+            skipped_empty += 1
+        total += result
+
+    print(f"📊 Пропущено: вже опубліковано={skipped_published}, стара дата={skipped_date}, порожні={skipped_empty}", flush=True)
     print(f"Готово. Опубліковано: {total}.", flush=True)
 
 
