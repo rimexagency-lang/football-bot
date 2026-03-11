@@ -152,14 +152,20 @@ def to_kyiv_str(starting_at):
         return starting_at[:16]
 
 
-def is_date_relevant(starting_at):
-    """Перевіряє чи дата матчу в межах: вчора — завтра."""
+def is_date_relevant(starting_at, news_type="pre"):
+    """Перевіряє чи дата матчу в межах вікна.
+    pre-match: від -1 до +7 днів
+    post-match: від -3 до +1 день
+    """
     if not starting_at:
         return True  # якщо дати немає — не фільтруємо
     try:
         match_dt = datetime.strptime(starting_at[:10], "%Y-%m-%d")
         now = datetime.now()
-        return (now - timedelta(days=1)) <= match_dt <= (now + timedelta(days=2))
+        if news_type == "post":
+            return (now - timedelta(days=3)) <= match_dt <= (now + timedelta(days=1))
+        else:
+            return (now - timedelta(days=1)) <= match_dt <= (now + timedelta(days=7))
     except Exception:
         return True
 
@@ -187,6 +193,49 @@ def get_fixture(fixture_id):
 
 # ========== ФОТО ==========
 
+_logo_cache = {}  # кеш логотипів Wikipedia за назвою команди
+
+def upgrade_sportmonks_url(url):
+    """Спробувати отримати більший розмір з Sportmonks CDN."""
+    if not url or "cdn.sportmonks.com" not in url:
+        return url
+    # Sportmonks CDN: .../teams/22/22.png → спробуємо /big/ або /400/
+    # Також прибираємо можливі маленькі суфікси типу _small
+    url = url.replace("_small", "").replace("_thumb", "").replace("_150", "").replace("_100", "")
+    return url
+
+
+def get_wikipedia_logo(team_name):
+    """Отримати логотип команди з Wikipedia (400px)."""
+    if not team_name:
+        return None
+    cache_key = team_name.lower().strip()
+    if cache_key in _logo_cache:
+        return _logo_cache[cache_key]
+    try:
+        # Шукаємо сторінку на Wikipedia
+        search_url = "https://en.wikipedia.org/w/api.php"
+        r = requests.get(search_url, params={
+            "action": "query",
+            "titles": team_name,
+            "prop": "pageimages",
+            "format": "json",
+            "pithumbsize": 400,
+            "redirects": 1
+        }, timeout=8)
+        if r.status_code == 200:
+            pages = r.json().get("query", {}).get("pages", {})
+            for page in pages.values():
+                thumb = page.get("thumbnail", {}).get("source")
+                if thumb:
+                    _logo_cache[cache_key] = thumb
+                    return thumb
+    except Exception as e:
+        print(f"⚠️ Wikipedia logo ({team_name}): {e}", flush=True)
+    _logo_cache[cache_key] = None
+    return None
+
+
 def get_image(fixture):
     global _fallback_index
 
@@ -196,15 +245,25 @@ def get_image(fixture):
         key=lambda p: 0 if str((p.get("meta") or {}).get("location", "")).lower() == "home" else 1
     )
 
+    # 1. Спочатку пробуємо Sportmonks з покращеним URL
     for p in sorted_p:
         img = p.get("image_path") or p.get("logo_path")
         if img and img.startswith("http"):
-            return img
+            return upgrade_sportmonks_url(img)
 
+    # 2. Fallback — Wikipedia за назвою команди (home team)
+    for p in sorted_p:
+        name = p.get("name") or p.get("display_name")
+        if name:
+            wiki_img = get_wikipedia_logo(name)
+            if wiki_img:
+                return wiki_img
+
+    # 3. Логотип ліги
     league = fixture.get("league") or {}
     img = league.get("image_path") or league.get("logo_path")
     if img and img.startswith("http"):
-        return img
+        return upgrade_sportmonks_url(img)
 
     img = FALLBACK_IMAGES[_fallback_index % len(FALLBACK_IMAGES)]
     _fallback_index += 1
@@ -215,7 +274,6 @@ def get_image(fixture):
 
 def get_all_news():
     all_news = []
-    league_filter = ",".join(str(i) for i in LEAGUE_IDS)
 
     endpoints = [
         ("pre-match/upcoming", "прематч майбутні"),
@@ -228,7 +286,6 @@ def get_all_news():
         params = {
             "api_token": SPORTMONKS_TOKEN,
             "include": "lines",
-            "filters": f"newsitemLeagues:{league_filter}",
             "per_page": 50
         }
         try:
@@ -413,10 +470,6 @@ def process_news(news_item):
     if not news_id or str(news_id) in published_ids:
         return 0
 
-    league_id = news_item.get("league_id")
-    if league_id not in LEAGUE_IDS:
-        return 0
-
     fixture_id = news_item.get("fixture_id")
     title = (news_item.get("title") or "").strip()
     news_type_raw = news_item.get("type", "prematch")
@@ -435,8 +488,8 @@ def process_news(news_item):
             starting_at = f.get("starting_at", "")
             image_url = get_image(f)
 
-    # Фільтр по даті — тільки вчора, сьогодні і завтра
-    if starting_at and not is_date_relevant(starting_at):
+    # Фільтр по даті — pre: -1..+7, post: -3..+1
+    if starting_at and not is_date_relevant(starting_at, news_type):
         return 0
 
     lines = news_item.get("lines", [])
@@ -516,6 +569,7 @@ def run_all():
     skipped_published = 0
     skipped_date = 0
     skipped_empty = 0
+    debug_dates = []  # для дебагу перших 10 невідомих дат
 
     total = 0
     for n in all_news:
@@ -524,17 +578,16 @@ def run_all():
             skipped_published += 1
             continue
 
-        lid = n.get("league_id")
-        if lid not in LEAGUE_IDS:
-            continue
-
         # Попередня перевірка дати через fixture (з кешем)
         fid = n.get("fixture_id")
+        ntype = "post" if "post" in str(n.get("type", "")).lower() else "pre"
         if fid:
             f = get_fixture(fid)
             sa = f.get("starting_at", "") if f else ""
-            if sa and not is_date_relevant(sa):
+            if sa and not is_date_relevant(sa, ntype):
                 skipped_date += 1
+                if len(debug_dates) < 5:
+                    debug_dates.append(f"{sa[:10]}({ntype})")
                 continue
 
         result = process_news(n)
@@ -542,6 +595,8 @@ def run_all():
             skipped_empty += 1
         total += result
 
+    if debug_dates:
+        print(f"📅 Приклади відфільтрованих дат: {', '.join(debug_dates)}", flush=True)
     print(f"📊 Пропущено: вже опубліковано={skipped_published}, стара дата={skipped_date}, порожні={skipped_empty}", flush=True)
     print(f"Готово. Опубліковано: {total}.", flush=True)
 
