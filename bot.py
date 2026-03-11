@@ -565,7 +565,279 @@ def process_news(news_item):
     return 1
 
 
-# ========== ГОЛОВНА ФУНКЦІЯ ==========
+
+# ========== RSS НОВИНИ ==========
+
+RSS_FEEDS = [
+    ("https://www.goal.com/feeds/en/news", "Goal.com"),
+    ("https://feeds.bbci.co.uk/sport/football/rss.xml", "BBC Sport"),
+    ("https://www.uefa.com/rssfeed/newsrss.xml", "UEFA"),
+]
+
+def parse_rss(url, source_name):
+    """Парсить RSS стрічку і повертає список новин."""
+    items = []
+    try:
+        r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code != 200:
+            return items
+        # Простий XML парсинг без зовнішніх бібліотек
+        content = r.text
+        entries = re.findall(r'<item>(.*?)</item>', content, re.DOTALL)
+        for entry in entries[:10]:  # максимум 10 з кожного джерела
+            title = re.search(r'<title><!\[CDATA\[(.*?)\]\]></title>|<title>(.*?)</title>', entry, re.DOTALL)
+            link  = re.search(r'<link>(.*?)</link>|<link\s[^>]*href="([^"]+)"', entry, re.DOTALL)
+            desc  = re.search(r'<description><!\[CDATA\[(.*?)\]\]></description>|<description>(.*?)</description>', entry, re.DOTALL)
+            pub   = re.search(r'<pubDate>(.*?)</pubDate>', entry)
+
+            title_text = (title.group(1) or title.group(2) or "").strip() if title else ""
+            link_url   = (link.group(1) or link.group(2) or "").strip() if link else ""
+            desc_text  = re.sub(r'<[^>]+>', '', (desc.group(1) or desc.group(2) or "").strip()) if desc else ""
+            pub_text   = pub.group(1).strip() if pub else ""
+
+            if title_text:
+                items.append({
+                    "title": title_text,
+                    "link": link_url,
+                    "description": desc_text[:500],
+                    "pubDate": pub_text,
+                    "source": source_name,
+                })
+    except Exception as e:
+        print(f"⚠️ RSS {source_name}: {e}", flush=True)
+    return items
+
+
+def is_rss_recent(pub_date_str, hours=6):
+    """Перевіряє чи новина свіжа (не старіша за N годин)."""
+    if not pub_date_str:
+        return True
+    try:
+        from email.utils import parsedate_to_datetime
+        dt = parsedate_to_datetime(pub_date_str)
+        now = datetime.now(tz=dt.tzinfo)
+        return (now - dt).total_seconds() < hours * 3600
+    except Exception:
+        return True
+
+
+def run_rss():
+    """Перевіряє RSS і публікує нові статті."""
+    total = 0
+    for feed_url, source in RSS_FEEDS:
+        items = parse_rss(feed_url, source)
+        for item in items:
+            # Унікальний ID для RSS — хеш посилання
+            rss_id = "rss_" + str(abs(hash(item["link"] or item["title"])))
+            if rss_id in published_ids:
+                continue
+            if not is_rss_recent(item["pubDate"], hours=6):
+                continue
+
+            title_ua = translate(item["title"])
+            desc_ua  = translate(item["description"]) if item["description"] else ""
+
+            post = f"📰 <b>{title_ua}</b>\n"
+            post += f"🌐 {source}\n"
+            if desc_ua:
+                post += f"\n{desc_ua[:400]}"
+            if item["link"]:
+                post += f'\n\n<a href="{item["link"]}">🔗 Читати повністю</a>'
+
+            if send_telegram(post):
+                published_ids[rss_id] = datetime.now().strftime("%Y-%m-%d")
+                total += 1
+                time.sleep(3)
+
+    if total:
+        save_published_ids(published_ids)
+        print(f"📰 RSS опубліковано: {total}", flush=True)
+    return total
+
+
+# ========== РОЗКЛАД МАТЧІВ ==========
+
+SCHEDULE_LEAGUES = {
+    2: "🏆 Ліга Чемпіонів",
+    5: "🥈 Ліга Європи",
+    8: "🏴󠁧󠁢󠁥󠁮󠁧󠁿 Прем'єр-ліга",
+    82: "🇪🇸 Ла Ліга",
+    564: "🇩🇪 Бундесліга",
+    384: "🇮🇹 Серія А",
+    301: "🇫🇷 Ліг 1",
+    9: "🇵🇹 Прімейра",
+}
+
+def get_todays_schedule():
+    """Отримує і публікує розклад матчів на сьогодні (раз на добу о 8:00 Київ)."""
+    now_kyiv = datetime.now(KYIV_TZ)
+    today = now_kyiv.strftime("%Y-%m-%d")
+    schedule_id = f"schedule_{today}"
+    if schedule_id in published_ids:
+        return 0
+
+    # Публікуємо тільки якщо зараз 8:00-9:00 за Києвом
+    if now_kyiv.hour != 8:
+        return 0
+
+    fixtures = get_fixtures_with_news(today)
+    if not fixtures:
+        return 0
+
+    # Групуємо по лігах (тільки ті що нас цікавлять)
+    by_league = {}
+    for f in fixtures:
+        lid = f.get("league_id")
+        if lid not in SCHEDULE_LEAGUES:
+            continue
+        if lid not in by_league:
+            by_league[lid] = []
+        by_league[lid].append(f)
+
+    if not by_league:
+        return 0
+
+    lines = [f"📅 <b>Розклад матчів на {now_kyiv.strftime('%d.%m.%Y')}</b>\n"]
+    for lid in PRIORITY_LEAGUES:
+        if lid not in by_league:
+            continue
+        lines.append(f"\n{SCHEDULE_LEAGUES[lid]}")
+        for f in by_league[lid]:
+            name = f.get("name", "")
+            sa = f.get("starting_at", "")
+            time_str = to_kyiv_str(sa) if sa else "?"
+            # Показуємо лише час (не дату)
+            time_only = time_str.split(" ")[-1] if " " in time_str else time_str
+            lines.append(f"  ⚽ {name} — {time_only} за Києвом")
+
+    post = "\n".join(lines)
+    if send_telegram(post):
+        published_ids[schedule_id] = today
+        save_published_ids(published_ids)
+        print(f"📅 Розклад опубліковано", flush=True)
+        return 1
+    return 0
+
+
+# ========== ТАБЛИЦІ ЛІГ ==========
+
+STANDINGS_LEAGUES = [8, 82, 564, 384, 301]  # АПЛ, Ла Ліга, Бундесліга, Серія А, Ліг 1
+
+def get_league_standings(league_id):
+    """Отримує поточну таблицю ліги."""
+    try:
+        r = requests.get(
+            f"https://api.sportmonks.com/v3/football/standings/latest/{league_id}",
+            params={"api_token": SPORTMONKS_TOKEN, "include": "participant"},
+            timeout=15
+        )
+        if r.status_code == 200:
+            return r.json().get("data", [])
+    except Exception as e:
+        print(f"⚠️ Standings {league_id}: {e}", flush=True)
+    return []
+
+
+def run_standings():
+    """Публікує таблиці топ-ліг (раз на тиждень у понеділок о 10:00 Київ)."""
+    now_kyiv = datetime.now(KYIV_TZ)
+    # Тільки понеділок (weekday=0) о 10:00
+    if now_kyiv.weekday() != 0 or now_kyiv.hour != 10:
+        return 0
+
+    week_id = f"standings_{now_kyiv.strftime('%Y-W%W')}"
+    if week_id in published_ids:
+        return 0
+
+    league_names = {
+        8: "🏴󠁧󠁢󠁥󠁮󠁧󠁿 Прем'єр-ліга",
+        82: "🇪🇸 Ла Ліга",
+        564: "🇩🇪 Бундесліга",
+        384: "🇮🇹 Серія А",
+        301: "🇫🇷 Ліг 1",
+    }
+
+    published_any = False
+    for lid in STANDINGS_LEAGUES:
+        standings = get_league_standings(lid)
+        if not standings:
+            continue
+
+        top10 = sorted(standings, key=lambda x: x.get("position", 99))[:10]
+        lines = [f"📊 <b>Таблиця — {league_names.get(lid, '')}</b>\n"]
+        for row in top10:
+            pos  = row.get("position", "?")
+            name = (row.get("participant") or {}).get("name", row.get("team_name", "?"))
+            pts  = row.get("points", "?")
+            won  = row.get("won", 0)
+            draw = row.get("draw", 0)
+            lost = row.get("lost", 0)
+            lines.append(f"{pos}. {name} — {pts} очок ({won}П {draw}Н {lost}П)")
+
+        post = "\n".join(lines)
+        if send_telegram(post):
+            published_any = True
+            time.sleep(3)
+
+    if published_any:
+        published_ids[week_id] = now_kyiv.strftime("%Y-%m-%d")
+        save_published_ids(published_ids)
+        print(f"📊 Таблиці опубліковано", flush=True)
+        return 1
+    return 0
+
+
+# ========== СТАТИСТИКА БОМБАРДИРІВ ==========
+
+def run_top_scorers():
+    """Публікує топ бомбардирів (раз на тиждень у п'ятницю о 12:00 Київ)."""
+    now_kyiv = datetime.now(KYIV_TZ)
+    # Тільки п'ятниця (weekday=4) о 12:00
+    if now_kyiv.weekday() != 4 or now_kyiv.hour != 12:
+        return 0
+
+    week_id = f"scorers_{now_kyiv.strftime('%Y-W%W')}"
+    if week_id in published_ids:
+        return 0
+
+    league_names = {8: "🏴󠁧󠁢󠁥󠁮󠁧󠁿 АПЛ", 82: "🇪🇸 Ла Ліга", 564: "🇩🇪 Бундесліга"}
+    published_any = False
+
+    for lid, lname in league_names.items():
+        try:
+            r = requests.get(
+                f"https://api.sportmonks.com/v3/football/topscorers/season/latest/{lid}",
+                params={"api_token": SPORTMONKS_TOKEN, "include": "player;participant", "per_page": 10},
+                timeout=15
+            )
+            if r.status_code != 200:
+                continue
+            scorers = r.json().get("data", [])
+            if not scorers:
+                continue
+
+            lines = [f"⚽ <b>Топ бомбардири — {lname}</b>\n"]
+            for i, s in enumerate(scorers[:10], 1):
+                player = (s.get("player") or {}).get("display_name") or (s.get("player") or {}).get("name", "?")
+                team   = (s.get("participant") or {}).get("name", "")
+                goals  = s.get("total", s.get("goals", "?"))
+                lines.append(f"{i}. {player} ({team}) — {goals} голів")
+
+            post = "\n".join(lines)
+            if send_telegram(post):
+                published_any = True
+                time.sleep(3)
+        except Exception as e:
+            print(f"⚠️ TopScorers {lid}: {e}", flush=True)
+
+    if published_any:
+        published_ids[week_id] = now_kyiv.strftime("%Y-%m-%d")
+        save_published_ids(published_ids)
+        print(f"⚽ Бомбардири опубліковано", flush=True)
+        return 1
+    return 0
+
+
 
 def run_all():
     global published_ids, _fixture_cache
@@ -608,6 +880,12 @@ def run_all():
 
     print(f"📊 Пропущено: вже опубліковано={skipped_published}, порожні={skipped_empty}", flush=True)
     print(f"Готово. Опубліковано: {total}.", flush=True)
+
+    # Додатковий контент
+    run_rss()
+    get_todays_schedule()
+    run_standings()
+    run_top_scorers()
 
 
 # ========== ЗАПУСК ==========
