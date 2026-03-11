@@ -624,6 +624,15 @@ def is_rss_recent(pub_date_str, hours=6):
         return True
 
 
+# Фрази-сміття які треба фільтрувати
+JUNK_PHRASES = [
+    'image source', 'image caption', 'getty images', 'reuters',
+    'senior football correspondent', 'published', 'updated',
+    'cookie', 'subscribe', 'sign up', 'newsletter', 'javascript',
+    'terms of use', 'privacy policy', 'all rights reserved',
+    'skip to content', 'advertisement', 'related topics',
+]
+
 def fetch_article_text(url):
     """Витягує текст статті — шукає <article> або основний контент."""
     if not url:
@@ -642,14 +651,23 @@ def fetch_article_text(url):
             if main_match:
                 text = main_match.group(1)
         # Прибираємо скрипти, стилі, навігацію
-        text = re.sub(r'<(script|style|nav|header|footer|aside)[^>]*>.*?</\1>', '', text, flags=re.DOTALL)
+        text = re.sub(r'<(script|style|nav|header|footer|aside|figure|figcaption)[^>]*>.*?</\1>', '', text, flags=re.DOTALL)
         paragraphs = re.findall(r'<p[^>]*>(.*?)</p>', text, re.DOTALL)
         clean = []
         for p in paragraphs:
             p = re.sub(r'<[^>]+>', '', p).strip()
-            if len(p) > 60 and not any(x in p.lower() for x in ['cookie', 'subscribe', 'sign up', 'newsletter', 'javascript']):
-                clean.append(p)
-        return "\n\n".join(clean[:15])
+            p = re.sub(r'\s+', ' ', p)  # нормалізуємо пробіли
+            p_lower = p.lower()
+            # Фільтруємо сміття
+            if len(p) < 60:
+                continue
+            if any(junk in p_lower for junk in JUNK_PHRASES):
+                continue
+            # Фільтруємо рядки з датами типу "Published11 March"
+            if re.search(r'(Published|Updated)\d', p):
+                continue
+            clean.append(p)
+        return "\n\n".join(clean[:12])
     except Exception:
         return ""
 
@@ -687,9 +705,17 @@ def run_rss():
             # Фото: з RSS → og:image → нічого
             image_url = item.get("image") or fetch_og_image(item["link"])
 
-            # Повний текст для Telegraph
+            # Повний текст — перекладаємо по абзацах
             full_raw = fetch_article_text(item["link"]) or item["description"]
-            full_ua = translate(full_raw) if full_raw else ""
+            full_ua = ""
+            if full_raw:
+                # Перекладаємо по абзацах щоб не перевищити ліміт DeepL
+                paragraphs = full_raw.split("\n\n")
+                translated = []
+                for para in paragraphs:
+                    if para.strip():
+                        translated.append(translate(para.strip()))
+                full_ua = "\n\n".join(translated)
 
             telegraph_url = None
             if full_ua:
